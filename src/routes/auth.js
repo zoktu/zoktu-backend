@@ -8,6 +8,7 @@ import User from '../models/User.js';
 import Session from '../models/Session.js';
 import { randomUUID } from 'crypto';
 import { assessIpRisk } from '../lib/ipRisk.js';
+import { sendMail } from '../lib/mailer.js';
 
 const router = Router();
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -247,13 +248,32 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Please provide a valid email address' });
   }
 
-  const normalized = email.trim().toLowerCase();
+      // Fire-and-forget: send verification email if we have an address
+      try {
+        if (convertingGuest.email) {
+          const vToken = jwt.sign({ email: convertingGuest.email, purpose: 'verify_email' }, env.jwtSecret, { expiresIn: '1d' });
+          const verifyUrl = `${env.clientOrigin.replace(/\/$/, '')}/auth/verify-email?token=${encodeURIComponent(vToken)}`;
+          const html = `<p>Hi ${convertingGuest.displayName || ''},</p><p>Thanks for signing up. Please verify your email by clicking the link below:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p>If you didn't sign up, ignore this message.</p>`;
+          sendMail({ to: convertingGuest.email, subject: 'Verify your ChitZ account', html }).catch((e) => console.warn('⚠️ verify-email send failed', e?.message || e));
+        }
+      } catch (e) {
+        console.warn('⚠️ Failed to queue verification email', e?.message || e);
+      }
+      res.json({ user: sanitizeUser(convertingGuest), token, sessionId });
   const user = Array.from(users.values()).find((u) => (u.email || '').toLowerCase() === normalized);
 
   if (user) {
     user.resetToken = `reset-${Date.now()}`;
     user.resetTokenExpires = Date.now() + 20 * 60 * 1000; // 20 minutes
     try { await persistUserToDb(user); } catch (_) {}
+    // send reset email (non-blocking)
+    try {
+      const resetUrl = `${env.clientOrigin.replace(/\/$/, '')}/auth/reset-password?token=${encodeURIComponent(user.resetToken)}`;
+      const html = `<p>Hi ${user.displayName || ''},</p><p>We received a request to reset your password. Click the link below to reset it (valid for 20 minutes):</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>If you didn't request this, ignore this message.</p>`;
+      sendMail({ to: user.email, subject: 'Reset your ChitZ password', html }).catch((e) => console.warn('⚠️ reset-email send failed', e?.message || e));
+    } catch (e) {
+      console.warn('⚠️ Failed to queue reset email', e?.message || e);
+    }
   }
 
   res.json({ message: 'If an account exists with that email, a reset link has been sent.' });

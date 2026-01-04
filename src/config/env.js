@@ -20,3 +20,11 @@ export const env = {
   jwtSecret: process.env.JWT_SECRET || 'change-me',
   clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173'
 };
+
+// Optional SMTP/email configuration (read from .env when provided)
+env.smtpHost = process.env.SMTP_HOST || '';
+env.smtpPort = process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : undefined;
+env.smtpUser = process.env.SMTP_USER || '';
+env.smtpPass = process.env.SMTP_PASS || '';
+env.smtpSecure = (process.env.SMTP_SECURE || 'false') === 'true';
+env.emailFrom = process.env.EMAIL_FROM || process.env.SMTP_USER || 'no-reply@localhost';
