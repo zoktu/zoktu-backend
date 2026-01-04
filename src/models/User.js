@@ -41,6 +41,8 @@ const UserSchema = new mongoose.Schema({
   },
   // Session info for user sessions (debugging/management)
   sessions: [{ token: String, createdAt: Date, lastActive: Date }],
+  lastIp: String,
+  lastActive: Date,
   resetToken: String,
   resetTokenExpires: Number,
   deletePending: Boolean,

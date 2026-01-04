@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { asyncHandler } from '../utils/asyncHandler.js';
-import { getModelForRoom } from '../models/Message.js';
+import { getModelForRoom, RoomMessage, DMMessage, RandomMessage } from '../models/Message.js';
+import jwt from 'jsonwebtoken';
+import { env } from '../config/env.js';
 import Room from '../models/Room.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
 
@@ -64,7 +66,29 @@ router.get('/rooms/:roomId/messages', (req, res) => {
       const Model = getModelForRoom(roomDoc);
       const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
       const docs = await Model.find({ roomId }).sort({ createdAt: -1 }).limit(limit).lean();
-      const mapped = docs.reverse().map(d => ({ id: d._id.toString(), roomId: d.roomId, senderId: d.senderId, senderName: d.senderName, content: d.content, type: d.type, timestamp: d.createdAt }));
+      // identify current user from Authorization header (optional)
+      let currentUserId = null;
+      try {
+        const header = req.headers.authorization || '';
+        const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+        if (token) {
+          const payload = jwt.verify(token, env.jwtSecret);
+          currentUserId = payload?.id || null;
+        }
+      } catch (e) {
+        currentUserId = null;
+      }
+
+      const mapped = docs.reverse().map(d => {
+        const meta = d.meta || {};
+        let viewedEntry = null;
+        if (currentUserId && Array.isArray(meta.viewed)) {
+          viewedEntry = meta.viewed.find(v => v.userId === currentUserId) || null;
+        }
+        const expireAt = viewedEntry ? (viewedEntry.expireAt ? new Date(viewedEntry.expireAt).toISOString() : null) : null;
+        const expiredForYou = expireAt ? (Date.now() > new Date(expireAt).getTime()) : false;
+        return ({ id: d._id.toString(), roomId: d.roomId, senderId: d.senderId, senderName: d.senderName, content: d.content, type: d.type, timestamp: d.createdAt, meta, viewedByCurrentUser: Boolean(viewedEntry), expireAt, expiredForCurrentUser: expiredForYou });
+      });
       res.json(mapped);
     } catch (e) {
       // fallback to in-memory cache
@@ -87,6 +111,39 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   if (isUserMuted(senderId)) {
     const until = mutedUsers.get(senderId);
     return res.status(403).json({ message: 'You are muted for spamming', mutedUntil: until });
+  }
+
+  // Check room-level bans/mutes (by userId or IP)
+  try {
+    const ip = (req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.ip || '').toString().split(',')[0].trim();
+    const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+    if (roomDoc) {
+      // check direct userId ban
+      if (Array.isArray(roomDoc.bannedUsers) && senderId && roomDoc.bannedUsers.includes(senderId)) {
+        return res.status(403).json({ message: 'You are banned from this room' });
+      }
+      // check user's linked guestId
+      try {
+        const u = senderId ? await User.findById(senderId).lean().catch(() => null) : null;
+        if (u && u.guestId && Array.isArray(roomDoc.bannedUsers) && roomDoc.bannedUsers.includes(u.guestId)) {
+          return res.status(403).json({ message: 'You are banned from this room' });
+        }
+      } catch (e) {}
+      if (Array.isArray(roomDoc.bannedIPs) && ip && roomDoc.bannedIPs.includes(ip)) {
+        return res.status(403).json({ message: 'Your IP is banned from this room' });
+      }
+      // check mutedUsers array
+      if (Array.isArray(roomDoc.mutedUsers) && senderId) {
+        const mu = roomDoc.mutedUsers.find(m => m.userId === senderId && new Date(m.until) > new Date());
+        if (mu) return res.status(403).json({ message: 'You are muted in this room', mutedUntil: mu.until });
+      }
+      if (Array.isArray(roomDoc.mutedIPs) && ip) {
+        const mi = roomDoc.mutedIPs.find(m => m.ip === ip && new Date(m.until) > new Date());
+        if (mi) return res.status(403).json({ message: 'Your IP is muted in this room', mutedUntil: mi.until });
+      }
+    }
+  } catch (e) {
+    // ignore enforcement errors
   }
 
   // register message for rate tracking
@@ -125,5 +182,45 @@ router.post('/messages/:id/reactions', (req, res) => {
 router.delete('/messages/:id/reactions', (req, res) => {
   res.json({ message: 'reaction removed', emoji: req.body?.emoji, userId: req.body?.userId });
 });
+
+// Mark a message as viewed by the current user (per-user ephemeral view)
+router.post('/messages/:id/view', asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  // require auth
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ message: 'Unauthorized' });
+  let payload;
+  try {
+    payload = jwt.verify(token, env.jwtSecret);
+  } catch (e) {
+    return res.status(401).json({ message: 'Invalid token' });
+  }
+  const userId = payload?.id;
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+  const durationSeconds = Number(req.body?.durationSeconds) || 10; // default 10s
+  const expireAt = new Date(Date.now() + Math.max(1, durationSeconds) * 1000);
+
+  // Try to find the message in any of the collections
+  let doc = await RoomMessage.findById(id).catch(() => null);
+  if (!doc) doc = await DMMessage.findById(id).catch(() => null);
+  if (!doc) doc = await RandomMessage.findById(id).catch(() => null);
+  if (!doc) return res.status(404).json({ message: 'Message not found' });
+
+  const meta = doc.meta || {};
+  meta.viewed = Array.isArray(meta.viewed) ? meta.viewed : [];
+  const existing = meta.viewed.find(v => v.userId === userId);
+  const now = new Date();
+  if (existing) {
+    existing.viewedAt = now;
+    existing.expireAt = expireAt;
+  } else {
+    meta.viewed.push({ userId, viewedAt: now, expireAt });
+  }
+  doc.meta = meta;
+  await doc.save();
+  res.json({ message: 'view recorded', expireAt: expireAt.toISOString() });
+}));
 
 export default router;

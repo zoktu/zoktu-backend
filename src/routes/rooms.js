@@ -102,6 +102,27 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
   const userId = req.body.userId;
   const room = rooms.get(id);
   if (!room) return res.status(404).json({ message: 'Room not found' });
+  // enforce bans by checking DB-backed room if present
+  try {
+    const doc = await Room.findById(id).lean();
+    const ip = (req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.ip || '').toString().split(',')[0].trim();
+    if (doc) {
+      // check direct userId ban
+      if (Array.isArray(doc.bannedUsers) && doc.bannedUsers.includes(userId)) {
+        return res.status(403).json({ message: 'You are banned from this room' });
+      }
+      // also check linked guestId for this user (if any)
+      try {
+        const u = await User.findById(userId).lean().catch(() => null);
+        if (u && u.guestId && Array.isArray(doc.bannedUsers) && doc.bannedUsers.includes(u.guestId)) {
+          return res.status(403).json({ message: 'You are banned from this room' });
+        }
+      } catch (e) {}
+      if (Array.isArray(doc.bannedIPs) && ip && doc.bannedIPs.includes(ip)) {
+        return res.status(403).json({ message: 'Your IP is banned from this room' });
+      }
+    }
+  } catch (e) {}
   room.participants = [...new Set([...(room.participants || []), userId])];
   rooms.set(id, room);
   try {
@@ -153,6 +174,100 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   // remove from in-memory map as well
   rooms.delete(id);
   res.json({ message: 'Room deleted' });
+}));
+
+// Ban a user or IP from a room (owner/admin only)
+router.post('/:id/ban', asyncHandler(async (req, res) => {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ message: 'Unauthorized' });
+  let payload;
+  try { payload = jwt.verify(token, env.jwtSecret); } catch (e) { return res.status(401).json({ message: 'Invalid token' }); }
+
+  const id = req.params.id;
+  const { targetUserId, ip, banIp } = req.body || {};
+  const roomDoc = await Room.findById(id).lean().catch(() => null);
+  if (!roomDoc && !rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
+
+  const requesterId = payload.id;
+  const isAdmin = Array.isArray(roomDoc?.admins) && roomDoc.admins.includes(requesterId);
+  const isOwner = roomDoc && ((roomDoc.owner === requesterId) || (roomDoc.createdBy === requesterId));
+  if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Only owner or admins can ban users' });
+
+  try {
+    // build comprehensive ban lists: include target id, their guestId, and other accounts sharing lastIp
+    const bannedIds = [];
+    if (targetUserId) bannedIds.push(targetUserId);
+    try {
+      const target = targetUserId ? await User.findById(targetUserId).lean().catch(() => null) : null;
+      const ipToBan = ip || (target && target.lastIp) || null;
+      if (target && target.guestId) bannedIds.push(target.guestId);
+
+      // find other users sharing same IP and include their ids/guestIds as well
+      if (ipToBan) {
+        try {
+          const sameIpUsers = await User.find({ lastIp: ipToBan }).select(' _id guestId ').lean().catch(() => []);
+          for (const u of sameIpUsers || []) {
+            if (u._id) bannedIds.push(String(u._id));
+            if (u.guestId) bannedIds.push(u.guestId);
+          }
+        } catch (e) {}
+      }
+
+      // dedupe
+      const uniqueBannedIds = Array.from(new Set(bannedIds.filter(Boolean)));
+      const bannedIpList = ipToBan ? [ipToBan] : (banIp && ip ? [ip] : []);
+
+      const updateObj = {};
+      if (uniqueBannedIds.length) updateObj.$addToSet = { bannedUsers: { $each: uniqueBannedIds } };
+      if (bannedIpList.length) updateObj.$addToSet = Object.assign(updateObj.$addToSet || {}, { bannedIPs: { $each: bannedIpList } });
+
+      if (Object.keys(updateObj).length) {
+        await Room.findByIdAndUpdate(id, updateObj, { upsert: false }).catch(() => null);
+      }
+
+      return res.json({ message: 'Banned', targets: uniqueBannedIds, ips: bannedIpList });
+    } catch (e) {
+      console.warn('Ban flow failure', e?.message || e);
+      return res.status(500).json({ message: 'Failed to ban' });
+    }
+  } catch (e) {
+    console.warn('Ban failed', e?.message || e);
+    return res.status(500).json({ message: 'Failed to ban' });
+  }
+}));
+
+// Mute a user or IP for a duration (owner/admin only)
+router.post('/:id/mute', asyncHandler(async (req, res) => {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ message: 'Unauthorized' });
+  let payload;
+  try { payload = jwt.verify(token, env.jwtSecret); } catch (e) { return res.status(401).json({ message: 'Invalid token' }); }
+
+  const id = req.params.id;
+  const { targetUserId, ip, durationMs } = req.body || {};
+  const roomDoc = await Room.findById(id).lean().catch(() => null);
+  if (!roomDoc && !rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
+
+  const requesterId = payload.id;
+  const isAdmin = Array.isArray(roomDoc?.admins) && roomDoc.admins.includes(requesterId);
+  const isOwner = roomDoc && ((roomDoc.owner === requesterId) || (roomDoc.createdBy === requesterId));
+  if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Only owner or admins can mute users' });
+
+  const until = new Date(Date.now() + (Number(durationMs) || (5 * 60 * 1000)));
+  try {
+    if (targetUserId) {
+      await Room.findByIdAndUpdate(id, { $push: { mutedUsers: { userId: targetUserId, until } } }).catch(() => null);
+    }
+    if (ip) {
+      await Room.findByIdAndUpdate(id, { $push: { mutedIPs: { ip, until } } }).catch(() => null);
+    }
+    return res.json({ message: 'Muted', targetUserId, ip, until });
+  } catch (e) {
+    console.warn('Mute failed', e?.message || e);
+    return res.status(500).json({ message: 'Failed to mute' });
+  }
 }));
 
 router.post('/:id/leave', asyncHandler(async (req, res) => {
