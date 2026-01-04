@@ -6,6 +6,11 @@ import { env } from './config/env.js';
 import { connectDb } from './config/db.js';
 import routes from './routes/index.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { createServer } from 'http';
+import { Server as IOServer } from 'socket.io';
+import { messages } from './routes/messages.js';
+import Message from './models/Message.js';
+import Room from './models/Room.js';
 
 const app = express();
 
@@ -23,9 +28,200 @@ app.use((req, res) => {
 
 app.use(errorHandler);
 
+// HTTP server + socket.io for real-time pairing/messaging
+const httpServer = createServer(app);
+const io = new IOServer(httpServer, {
+  cors: { origin: env.clientOrigin, methods: ['GET', 'POST'] }
+});
+
+// Simple in-memory socket registries and waiting queue for random pairing
+const socketsByUser = new Map(); // userId -> socket
+const waitingSockets = [];
+// Per-user message rate tracking and mute map (same rules as REST)
+const userMessageWindow = new Map(); // userId -> { count, windowStart }
+const mutedUsers = new Map(); // userId -> muteUntil timestamp
+const MESSAGE_WINDOW_MS = 15000; // 15s window
+const MESSAGE_LIMIT = 8; // more than this in window => mute
+const MUTE_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_WORDS = 200; // maximum words allowed per message
+
+const isUserMuted = (userId) => {
+  if (!userId) return false;
+  const until = mutedUsers.get(userId) || 0;
+  if (Date.now() < until) return true;
+  if (until) mutedUsers.delete(userId);
+  return false;
+};
+
+const registerUserMessage = (userId) => {
+  if (!userId) return null;
+  const now = Date.now();
+  const record = userMessageWindow.get(userId) || { count: 0, windowStart: now };
+  if (now - record.windowStart > MESSAGE_WINDOW_MS) {
+    record.count = 1;
+    record.windowStart = now;
+  } else {
+    record.count += 1;
+  }
+  userMessageWindow.set(userId, record);
+  if (record.count > MESSAGE_LIMIT) {
+    const until = Date.now() + MUTE_MS;
+    mutedUsers.set(userId, until);
+    return until;
+  }
+  return null;
+};
+
+io.on('connection', (socket) => {
+  const userId = socket.handshake.query?.userId || socket.handshake.auth?.userId || null;
+  if (userId) socketsByUser.set(userId, socket);
+
+  socket.on('disconnect', () => {
+    try { if (userId) socketsByUser.delete(userId); } catch (e) {}
+    // remove from waiting queue if present
+    const idx = waitingSockets.findIndex(w => w.socket.id === socket.id);
+    if (idx !== -1) waitingSockets.splice(idx, 1);
+
+    // Notify other participants in any rooms this socket was in that partner left
+    try {
+      for (const roomId of socket.rooms) {
+        if (roomId === socket.id) continue;
+        // emit to remaining members
+        socket.to(roomId).emit('room:partner-left', { roomId, userId });
+      }
+    } catch (e) {}
+  });
+
+  // Join random queue
+  socket.on('random:join', async (data) => {
+    const uid = data?.userId || userId || `guest-${socket.id}`;
+    // Try to find a waiting partner
+    for (let i = 0; i < waitingSockets.length; i++) {
+      const waiter = waitingSockets[i];
+      if (waiter.uid !== uid) {
+        waitingSockets.splice(i, 1);
+        const roomId = `dm-${Date.now()}`;
+        // have both sockets join room
+        socket.join(roomId);
+        try { waiter.socket.join(roomId); } catch (e) {}
+        // persist DM room in DB (best-effort)
+        try {
+          const doc = new Room({ _id: roomId, type: 'dm', participants: [waiter.uid, uid], members: [waiter.uid, uid], createdBy: waiter.uid });
+          await doc.save();
+        } catch (e) {}
+        // notify both
+        socket.emit('random:matched', { roomId, partnerId: waiter.uid });
+        try { waiter.socket.emit('random:matched', { roomId, partnerId: uid }); } catch (e) {}
+        return;
+      }
+    }
+
+    // no match -> add to waiting list
+    waitingSockets.push({ socket, uid, createdAt: Date.now() });
+    // auto-timeout after 20s
+    setTimeout(() => {
+      const idx = waitingSockets.findIndex(w => w.socket.id === socket.id);
+      if (idx !== -1) {
+        waitingSockets.splice(idx, 1);
+        socket.emit('random:timeout');
+      }
+    }, 20000);
+  });
+
+  socket.on('random:leave', () => {
+    const idx = waitingSockets.findIndex(w => w.socket.id === socket.id);
+    if (idx !== -1) waitingSockets.splice(idx, 1);
+  });
+
+  // Explicitly end a room (user requested end)
+  socket.on('room:end', (data) => {
+    try {
+      const roomId = data?.roomId;
+      if (!roomId) return;
+      // notify all in room
+      io.to(roomId).emit('room:ended', { roomId, by: userId || null });
+      // mark room inactive in DB (best-effort)
+      try { Room.findByIdAndUpdate(roomId, { isActive: false }).catch(() => {}); } catch (e) {}
+      // optionally force leave
+      const socketsInRoom = io.sockets.adapter.rooms.get(roomId) || new Set();
+      for (const sid of socketsInRoom) {
+        const s = io.sockets.sockets.get(sid);
+        try { s.leave(roomId); } catch (e) {}
+      }
+    } catch (e) {
+      // ignore
+    }
+  });
+
+  // Room messaging: accept { roomId, senderId, senderName, content }
+  socket.on('room:message', (payload) => {
+    try {
+      const { roomId, senderId, senderName, content } = payload || {};
+      if (!roomId || !content) return;
+
+      // word limit
+      const words = (content || '').trim().split(/\s+/).filter(Boolean).length;
+      if (words > MAX_WORDS) {
+        socket.emit('message:error', { message: `Message too long (max ${MAX_WORDS} words)` });
+        return;
+      }
+
+      // mute check
+      if (isUserMuted(senderId)) {
+        const until = mutedUsers.get(senderId);
+        socket.emit('muted', { mutedUntil: until });
+        return;
+      }
+
+      const muteStart = registerUserMessage(senderId);
+      if (muteStart) {
+        socket.emit('muted', { mutedUntil: muteStart });
+        return;
+      }
+
+          // persist message to DB
+          (async () => {
+            try {
+              // determine room type and pick the model
+              const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+              const Model = (await import('./models/Message.js')).getModelForRoom(roomDoc);
+              const doc = new Model({ roomId, senderId, senderName: senderName || '', content, type: 'text' });
+              await doc.save();
+              const msg = { id: doc._id.toString(), roomId, senderId, senderName: doc.senderName, content: doc.content, timestamp: doc.createdAt.toISOString() };
+              // update in-memory cache
+              try {
+                const list = messages.get(roomId) || [];
+                list.push(msg);
+                messages.set(roomId, list);
+              } catch (e) {}
+              // broadcast to room
+              io.to(roomId).emit('room:message', msg);
+            } catch (e) {
+              // fallback: broadcast without persistence
+              const fallbackMsg = { id: `msg-${Date.now()}-${Math.floor(Math.random()*1000)}`, roomId, senderId, senderName, content, timestamp: new Date().toISOString() };
+              const list = messages.get(roomId) || [];
+              list.push(fallbackMsg);
+              messages.set(roomId, list);
+              io.to(roomId).emit('room:message', fallbackMsg);
+            }
+          })();
+    } catch (e) {
+      // ignore
+    }
+  });
+});
+
 const start = async () => {
   await connectDb();
-  app.listen(env.port, () => {
+  // seed in-memory user store from MongoDB
+  try {
+    const { seedUsersFromDb } = await import('./lib/userStore.js');
+    await seedUsersFromDb();
+    console.log('✅ Seeded users from DB');
+  } catch (e) {
+    console.warn('⚠️ Could not seed users from DB', e.message || e);
+  }
+  httpServer.listen(env.port, () => {
     console.log(`🚀 Backend running on http://localhost:${env.port}`);
   });
 };

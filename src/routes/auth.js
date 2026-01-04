@@ -3,18 +3,28 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
+import { users, guestUsernames, persistUserToDb } from '../lib/userStore.js';
+import User from '../models/User.js';
+import Session from '../models/Session.js';
+import { randomUUID } from 'crypto';
+import { assessIpRisk } from '../lib/ipRisk.js';
 
 const router = Router();
-
-// Placeholder in-memory store
-const users = new Map();
-const guestUsernames = new Map(); // Track guest usernames
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DELETION_GRACE_PERIOD_MS = 10 * 24 * 60 * 60 * 1000;
 
 const getUserStorageKey = (user) => {
   if (!user) return null;
   return user.email || user.id || null;
+};
+
+const getRequestIp = (req) => {
+  // prefer X-Forwarded-For when behind proxies
+  const xff = req.headers['x-forwarded-for'];
+  if (xff && typeof xff === 'string') {
+    return xff.split(',')[0].trim();
+  }
+  return req.ip || req.connection?.remoteAddress || null;
 };
 
 const enforceDeletionWindow = (user) => {
@@ -88,6 +98,29 @@ const sanitizeUser = (user) => {
   return safeUser;
 };
 
+const createSessionForUser = async (userId, req) => {
+  try {
+    const sessionId = (typeof randomUUID === 'function') ? randomUUID() : `s-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+    const ip = getRequestIp(req);
+    const riskInfo = await assessIpRisk(ip).catch(() => ({ risk: false }));
+    const doc = new Session({
+      sessionId,
+      userId: userId || null,
+      deviceId: req.body?.deviceId || req.headers['x-device-id'] || null,
+      userAgent: req.headers['user-agent'] || null,
+      ip,
+      risk: Boolean(riskInfo?.risk),
+      riskScore: riskInfo?.score || null,
+      riskReason: riskInfo?.reason || null
+    });
+    await doc.save();
+    return sessionId;
+  } catch (e) {
+    console.warn('⚠️ Failed to create session', e?.message || e);
+    return null;
+  }
+};
+
 const findUserByIdentifier = (identifier) => {
   if (!identifier) return null;
   if (users.has(identifier)) {
@@ -116,11 +149,70 @@ const validateUsername = (username) => {
   return { valid: true, username: trimmed };
 };
 
+// Guest username validation: allow 2-character names (other rules same)
+const validateGuestUsername = (username) => {
+  if (!username || !username.trim()) {
+    return { valid: false, error: 'Username is required' };
+  }
+  const trimmed = username.trim();
+  if (trimmed.length < 3) {
+    return { valid: false, error: 'Username must be at least 3 characters' };
+  }
+  if (trimmed.length > 20) {
+    return { valid: false, error: 'Username must be less than 20 characters' };
+  }
+  if (!/^[a-zA-Z0-9_]+$/.test(trimmed)) {
+    return { valid: false, error: 'Username can only contain letters, numbers, and underscores' };
+  }
+  if (/^[0-9]/.test(trimmed)) {
+    return { valid: false, error: 'Username cannot start with a number' };
+  }
+  return { valid: true, username: trimmed };
+};
+
 router.post('/signup', asyncHandler(async (req, res) => {
   const { email, password, displayName } = req.body;
+  console.log('➡️ /api/auth/signup called', { email: !!email, hasAuthorization: !!req.headers.authorization });
   if (!email || !password) return res.status(400).json({ message: 'email and password required' });
-  if (users.has(email)) return res.status(409).json({ message: 'user exists' });
+
+  // If request contains an auth token, and it's a guest, convert that guest
+  const auth = extractAuthPayload(req);
+  let convertingGuest = null;
+  console.log('   signup auth result:', auth.error ? { error: auth.error.message } : { payload: auth.payload });
+  if (!auth.error && auth.payload && auth.payload.userType === 'guest') {
+    const candidate = findUserByIdentifier(auth.payload.id) || users.get(auth.payload.id);
+    if (candidate && candidate.userType === 'guest') {
+      convertingGuest = candidate;
+    }
+  }
+
   const hash = await bcrypt.hash(password, 10);
+
+  if (convertingGuest) {
+    // Convert existing guest to registered while preserving displayName
+    if (users.has(email)) return res.status(409).json({ message: 'email already in use' });
+    convertingGuest.email = email;
+    convertingGuest.password = hash;
+    convertingGuest.userType = 'registered';
+    // prefer provided displayName only if guest has none
+    convertingGuest.displayName = convertingGuest.displayName || displayName || email;
+    convertingGuest.name = convertingGuest.displayName;
+
+    try {
+      convertingGuest.lastIp = getRequestIp(req);
+      const saved = await persistUserToDb(convertingGuest);
+      users.set(email, convertingGuest);
+      users.set(convertingGuest.id, convertingGuest);
+      const token = signToken(convertingGuest);
+      const sessionId = await createSessionForUser(convertingGuest.id, req);
+      return res.json({ user: sanitizeUser(convertingGuest), token, sessionId });
+    } catch (e) {
+      console.warn('⚠️ Failed to persist converted guest to registered user', e?.message || e);
+      // fallthrough to in-memory registration
+    }
+  }
+
+  // Regular signup (no guest conversion)
   const profileName = displayName || email;
   const user = {
     id: String(users.size + 1),
@@ -131,9 +223,17 @@ router.post('/signup', asyncHandler(async (req, res) => {
     password: hash,
     emailVerified: false
   };
+  // persist to DB and in-memory
+  try {
+    user.lastIp = getRequestIp(req);
+    await persistUserToDb(user);
+  } catch (e) {
+    // non-fatal: continue using in-memory copy
+  }
   users.set(email, user);
   const token = signToken(user);
-  res.json({ user: sanitizeUser(user), token });
+  const sessionId = await createSessionForUser(user.id, req);
+  res.json({ user: sanitizeUser(user), token, sessionId });
 }));
 
 router.post('/forgot-password', asyncHandler(async (req, res) => {
@@ -153,6 +253,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
   if (user) {
     user.resetToken = `reset-${Date.now()}`;
     user.resetTokenExpires = Date.now() + 20 * 60 * 1000; // 20 minutes
+    try { await persistUserToDb(user); } catch (_) {}
   }
 
   res.json({ message: 'If an account exists with that email, a reset link has been sent.' });
@@ -178,42 +279,101 @@ router.post('/login', asyncHandler(async (req, res) => {
   }
 
   if (user.email) {
+    try { user.lastIp = getRequestIp(req); await persistUserToDb(user); } catch (_) {}
     users.set(user.email, user);
   }
 
   const token = signToken(user);
-  res.json({ user: sanitizeUser(user), token, deletionRecovered: hadPendingDeletion });
+  const sessionId = await createSessionForUser(user.id, req);
+  res.json({ user: sanitizeUser(user), token, deletionRecovered: hadPendingDeletion, sessionId });
 }));
 
-router.post('/guest', (req, res) => {
+router.post('/guest', asyncHandler(async (req, res) => {
   const { name } = req.body;
-  
+
   // Validate username
-  const validation = validateUsername(name);
+  const validation = validateGuestUsername(name);
   if (!validation.valid) {
     return res.status(400).json({ message: validation.error });
   }
-  
+
   const username = validation.username;
-  
-  // Check if username already exists
+
+  // Quick in-memory check (fast-fail), but we must also use an atomic DB upsert
   if (guestUsernames.has(username.toLowerCase())) {
     return res.status(409).json({ message: 'Username already taken' });
   }
-  
-  const userId = `guest-${Date.now()}`;
-  const user = { 
-    id: userId, 
-    email: '', 
-    displayName: username, 
-    userType: 'guest' 
-  };
-  
-  guestUsernames.set(username.toLowerCase(), userId);
-  
-  const token = signToken(user);
-  res.json({ user, token });
-});
+
+  // Prevent guest creation if a registered user already has this displayName (case-insensitive)
+  // Check in-memory first
+  const registeredCollision = Array.from(users.values()).find((u) => {
+    return u && u.userType !== 'guest' && (u.displayName || '').toLowerCase() === username.toLowerCase();
+  });
+  if (registeredCollision) {
+    return res.status(409).json({ message: 'Username already taken by a registered user' });
+  }
+
+  // Also check in MongoDB (case-insensitive) to avoid races with other processes
+  try {
+    const existingRegistered = await User.findOne({ displayName: { $regex: `^${username}$`, $options: 'i' }, userType: { $ne: 'guest' } }).lean().exec();
+    if (existingRegistered) {
+      return res.status(409).json({ message: 'Username already taken by a registered user' });
+    }
+  } catch (e) {
+    console.warn('⚠️ Could not check registered displayName collision in DB', e?.message || e);
+    // continue — we'll still attempt the upsert and rely on DB unique constraints for guests
+  }
+
+  // Use an atomic findOneAndUpdate with upsert to avoid race conditions
+  try {
+    const now = new Date();
+    const saved = await User.findOneAndUpdate(
+      { displayName: username, userType: 'guest' },
+      {
+        $setOnInsert: {
+          guestId: `guest-${Date.now()}`,
+          displayName: username,
+          userType: 'guest',
+          createdAt: now
+        },
+        $set: { lastIp: getRequestIp(req) }
+      },
+      { upsert: true, new: true }
+    ).lean().exec();
+
+    // Build the in-memory user object
+    const user = {
+      id: saved.guestId || String(saved._id),
+      email: '',
+      displayName: saved.displayName,
+      userType: 'guest',
+      createdAt: saved.createdAt
+    };
+
+    // update in-memory maps
+    try { user.lastIp = getRequestIp(req); await persistUserToDb(user); } catch (e) {}
+    guestUsernames.set(username.toLowerCase(), user.id);
+    users.set(user.id, user);
+
+    const token = signToken(user);
+    const sessionId = await createSessionForUser(user.id, req);
+    return res.json({ user, token, sessionId });
+  } catch (e) {
+    // Duplicate key may happen if another request inserted the same name concurrently
+    if (e && e.code === 11000) {
+      return res.status(409).json({ message: 'Username already taken' });
+    }
+    console.warn('⚠️ Failed to persist guest user', e?.message || e);
+    // Fall back to in-memory guest (non-persistent)
+    const fallbackId = `guest-${Date.now()}`;
+    const user = { id: fallbackId, email: '', displayName: username, userType: 'guest' };
+    guestUsernames.set(username.toLowerCase(), user.id);
+    users.set(user.id, user);
+    const token = signToken(user);
+    const sessionId = await createSessionForUser(user.id, req);
+    return res.json({ user, token, sessionId });
+  }
+}));
 
 // Check if username is available
 router.get('/check-username', (req, res) => {
@@ -223,19 +383,18 @@ router.get('/check-username', (req, res) => {
     return res.status(400).json({ message: 'Username is required' });
   }
   
-  // Validate username format
-  const validation = validateUsername(username);
+  // Use guest-specific validation (allows 2-character guest names)
+  const validation = validateGuestUsername(username);
   if (!validation.valid) {
     return res.status(400).json({ message: validation.error, available: false });
   }
-  
-  // Check if username exists
+
+  // Check if username exists (case-insensitive)
   const exists = guestUsernames.has(validation.username.toLowerCase());
-  
   if (exists) {
     return res.status(409).json({ message: 'Username already taken', available: false });
   }
-  
+
   return res.json({ message: 'Username is available', available: true });
 });
 
@@ -252,6 +411,7 @@ router.get('/me', (req, res) => {
   }
 
   const displayName = user?.displayName || payload.email || 'User';
+  // Include profile fields so frontend can show them on refresh
   res.json({
     id: user?.id || payload.id,
     uid: user?.id || payload.id,
@@ -259,7 +419,11 @@ router.get('/me', (req, res) => {
     userType: payload.userType,
     name: displayName,
     displayName,
-    emailVerified: user?.emailVerified ?? false
+    emailVerified: user?.emailVerified ?? false,
+    avatar: user?.avatar || user?.photoURL || null,
+    bio: user?.bio || '',
+    settings: user?.settings || {},
+    createdAt: user?.createdAt || payload.iat ? new Date() : undefined
   });
 });
 
@@ -292,8 +456,9 @@ router.post('/verify-email', asyncHandler(async (req, res) => {
   }
 
   const { user } = auth;
-  if (!user.email) {
-    return res.status(400).json({ message: 'No email linked to verify' });
+  if (user.email) {
+    try { await persistUserToDb(user); } catch (_) {}
+    users.set(user.email, user);
   }
 
   user.emailVerified = true;

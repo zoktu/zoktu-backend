@@ -6,6 +6,10 @@ import messagesRoutes from './messages.js';
 import encryptedRoutes from './encrypted.js';
 import healthRoutes from './health.js';
 import friendsRoutes from './friends.js';
+import debugRoutes from './debug.js';
+import uploadsRoutes from './uploads.js';
+import reportsRoutes from './reports.js';
+import sessionsRoutes from './sessions.js';
 
 const router = Router();
 
@@ -16,5 +20,9 @@ router.use('/', messagesRoutes);
 router.use('/', encryptedRoutes);
 router.use('/health', healthRoutes);
 router.use('/friends', friendsRoutes);
+router.use('/debug', debugRoutes);
+router.use('/uploads', uploadsRoutes);
+router.use('/reports', reportsRoutes);
+router.use('/sessions', sessionsRoutes);
 
 export default router;
