@@ -12,12 +12,168 @@ const rooms = new Map();
 // Simple in-memory waiting queue for random chat pairing
 const waitingQueue = [];
 
+const uniqStrings = (arr) => Array.from(new Set((arr || []).filter(Boolean).map((v) => String(v))));
+
+const buildDmKey = (participants) => {
+  const list = Array.isArray(participants) ? participants.map(String).filter(Boolean) : [];
+  if (list.length < 2) return null;
+  // For DMs, order shouldn't matter
+  return list.slice().sort().join('|');
+};
+
+const buildCanonicalDmKey = (participants, canonicalById) => {
+  const list = Array.isArray(participants) ? participants.map(String).filter(Boolean) : [];
+  if (list.length < 2) return null;
+  const canonical = list.map((id) => canonicalById.get(String(id)) || String(id));
+  const uniq = Array.from(new Set(canonical.filter(Boolean)));
+  // If both sides resolve to the same user, treat it as invalid (self-DM)
+  if (uniq.length < 2) return null;
+  return canonical.slice().sort().join('|');
+};
+
+const isDmRoomDoc = (doc) => Boolean(
+  doc && (
+    doc.type === 'dm' ||
+    doc.category === 'dm' ||
+    (doc.type === 'private' && doc.category === 'dm')
+  )
+);
+
+const expandUserIdentifiers = async ({ id, email }) => {
+  const ids = new Set();
+  if (id) ids.add(String(id));
+
+  try {
+    if (email) {
+      const uByEmail = await User.findOne({ email: String(email) }).select('_id guestId userType').lean().catch(() => null);
+      if (uByEmail?._id) ids.add(String(uByEmail._id));
+      if (uByEmail?.guestId) ids.add(String(uByEmail.guestId));
+    }
+  } catch (e) {}
+
+  try {
+    if (id) {
+      const u = await User.findOne({ $or: [{ _id: String(id) }, { guestId: String(id) }] }).select('_id guestId userType').lean().catch(() => null);
+      if (u?._id) ids.add(String(u._id));
+      if (u?.guestId) ids.add(String(u.guestId));
+    }
+  } catch (e) {}
+
+  return Array.from(ids);
+};
+
+const canonicalIdForUser = async (id) => {
+  if (!id) return null;
+  try {
+    const u = await User.findOne({ $or: [{ _id: String(id) }, { guestId: String(id) }] }).select('_id guestId userType').lean().catch(() => null);
+    if (!u) return String(id);
+    if (u.userType === 'guest' && u.guestId) return String(u.guestId);
+    if (u._id) return String(u._id);
+    return String(id);
+  } catch (e) {
+    return String(id);
+  }
+};
+
+const canonicalIdForAuthPayload = async (payload) => {
+  if (!payload) return null;
+
+  // Prefer resolving registered users by email because JWT payload.id may be a legacy in-memory id.
+  try {
+    if (payload.email) {
+      const u = await User.findOne({ email: String(payload.email) }).select('_id guestId userType').lean().catch(() => null);
+      if (u) {
+        if (u.userType === 'guest' && u.guestId) return String(u.guestId);
+        if (u._id) return String(u._id);
+      }
+    }
+  } catch (e) {}
+
+  return canonicalIdForUser(payload.id);
+};
+
+const getExpandedBlockedSetForUserId = async (userId) => {
+  if (!userId) return new Set();
+  try {
+    const u = await User.findOne({ $or: [{ _id: String(userId) }, { guestId: String(userId) }] })
+      .select('blockedUsers')
+      .lean()
+      .catch(() => null);
+    const raw = Array.isArray(u?.blockedUsers) ? u.blockedUsers.map(String).filter(Boolean) : [];
+    const out = new Set(raw);
+
+    // Expand to include both _id and guestId forms for each blocked user.
+    const objectIdCandidates = raw.filter((v) => /^[0-9a-fA-F]{24}$/.test(String(v)));
+    const guestIdCandidates = raw.filter((v) => String(v).startsWith('guest-'));
+    if (objectIdCandidates.length || guestIdCandidates.length) {
+      const docs = await User.find({
+        $or: [
+          ...(objectIdCandidates.length ? [{ _id: { $in: objectIdCandidates } }] : []),
+          ...(guestIdCandidates.length ? [{ guestId: { $in: guestIdCandidates } }] : [])
+        ]
+      })
+        .select('_id guestId')
+        .lean()
+        .exec();
+
+      for (const d of docs || []) {
+        if (d?._id) out.add(String(d._id));
+        if (d?.guestId) out.add(String(d.guestId));
+      }
+    }
+
+    return out;
+  } catch (e) {
+    return new Set();
+  }
+};
+
+const isBlockedEitherWay = async ({ aId, aIds, bId, bIds }) => {
+  const aSet = new Set(uniqStrings(aIds || [aId]));
+  const bSet = new Set(uniqStrings(bIds || [bId]));
+
+  const aBlocked = await getExpandedBlockedSetForUserId(aId);
+  for (const bid of bSet) {
+    if (aBlocked.has(String(bid))) return true;
+  }
+
+  const bBlocked = await getExpandedBlockedSetForUserId(bId);
+  for (const aid of aSet) {
+    if (bBlocked.has(String(aid))) return true;
+  }
+
+  return false;
+};
+
 router.get('/', asyncHandler(async (req, res) => {
   // prefer DB-backed list but fall back to in-memory
   try {
-    const { type } = req.query || {};
-    const match = {};
-    if (type) match.type = String(type);
+    const { type, member } = req.query || {};
+    const and = [];
+    if (type) and.push({ type: String(type) });
+    if (member) {
+      const m = String(member);
+
+      // Hide rooms removed by this user (supports canonical/guestId variants)
+      let expandedMemberIds = [m];
+      try {
+        const or = [];
+        if (/^[0-9a-fA-F]{24}$/.test(m)) or.push({ _id: m });
+        or.push({ guestId: m });
+        or.push({ email: m });
+        const u = await User.findOne(or.length ? { $or: or } : { guestId: m }).select('_id guestId').lean().catch(() => null);
+        if (u?._id) expandedMemberIds.push(String(u._id));
+        if (u?.guestId) expandedMemberIds.push(String(u.guestId));
+      } catch (e) {}
+      expandedMemberIds = uniqStrings(expandedMemberIds);
+
+      // list only rooms the user belongs to (DMs/private/public membership)
+      and.push({ $or: [{ members: m }, { participants: m }, { owner: m }, { createdBy: m }] });
+
+      // exclude rooms hidden by this user
+      and.push({ hiddenFor: { $nin: expandedMemberIds } });
+    }
+    const match = and.length ? { $and: and } : {};
 
     // Use aggregation to compute member count and sort by it (desc)
     const pipeline = [
@@ -26,12 +182,149 @@ router.get('/', asyncHandler(async (req, res) => {
       { $sort: { memberCount: -1, updatedAt: -1 } }
     ];
     const docs = await Room.aggregate(pipeline).allowDiskUse(true).exec();
-    const mapped = docs.map(d => ({ id: d._id, ...d }));
+
+    // De-dupe DMs: only one conversation per participant-pair
+    // Canonicalize ids so guestId vs Mongo _id variants collapse.
+    const dmDocs = (docs || []).filter((d) => isDmRoomDoc(d));
+    const candidateIds = [];
+    for (const d of dmDocs) {
+      const list = (d.participants || d.members || []).map(String).filter(Boolean);
+      for (const id of list) candidateIds.push(id);
+    }
+    const uniqueCandidateIds = Array.from(new Set(candidateIds));
+    const objectIdCandidates = uniqueCandidateIds.filter((v) => /^[0-9a-fA-F]{24}$/.test(String(v)));
+    const guestIdCandidates = uniqueCandidateIds.filter((v) => String(v).startsWith('guest-'));
+
+    const canonicalById = new Map();
+    try {
+      const userDocs = await User.find({
+        $or: [
+          ...(objectIdCandidates.length ? [{ _id: { $in: objectIdCandidates } }] : []),
+          ...(guestIdCandidates.length ? [{ guestId: { $in: guestIdCandidates } }] : [])
+        ]
+      })
+        .select('_id guestId userType')
+        .lean()
+        .exec();
+
+      for (const u of userDocs || []) {
+        const canonical = (u.userType === 'guest' && u.guestId) ? String(u.guestId) : String(u._id);
+        canonicalById.set(String(u._id), canonical);
+        if (u.guestId) canonicalById.set(String(u.guestId), canonical);
+      }
+    } catch (e) {
+      // best-effort
+    }
+
+    const seenDm = new Set();
+    const filtered = [];
+    for (const d of docs || []) {
+      if (isDmRoomDoc(d)) {
+        const key = buildCanonicalDmKey(d.participants || d.members, canonicalById) || buildDmKey(d.participants || d.members);
+        if (key) {
+          if (seenDm.has(key)) continue;
+          seenDm.add(key);
+        }
+      }
+      filtered.push(d);
+    }
+
+    const mapped = filtered.map(d => ({ id: d._id, ...d }));
     res.json(mapped);
     return;
   } catch (e) {
-    res.json(Array.from(rooms.values()));
+    // in-memory fallback with the same filters
+    const { type, member } = req.query || {};
+    const t = type ? String(type) : null;
+    const m = member ? String(member) : null;
+    const filtered = Array.from(rooms.values()).filter((r) => {
+      if (t && String(r.type) !== t) return false;
+      if (m) {
+        // hide rooms removed by this user
+        try {
+          const hiddenFor = Array.isArray(r.hiddenFor) ? r.hiddenFor.map(String) : [];
+          if (hiddenFor.includes(String(m))) return false;
+        } catch (e) {}
+        const list = (r.members || r.participants || []);
+        if (Array.isArray(list) && list.map(String).includes(m)) return true;
+        if (String(r.owner) === m) return true;
+        if (String(r.createdBy) === m) return true;
+        return false;
+      }
+      return true;
+    });
+
+    // De-dupe DMs in-memory as well
+    const seenDm = new Set();
+    const deduped = [];
+    for (const r of filtered) {
+      const isDm = Boolean(r && (r.type === 'dm' || r.category === 'dm' || (r.type === 'private' && r.category === 'dm')));
+      if (isDm) {
+        const key = buildDmKey(r.participants || r.members);
+        if (key) {
+          if (seenDm.has(key)) continue;
+          seenDm.add(key);
+        }
+      }
+      deduped.push(r);
+    }
+
+    res.json(deduped);
   }
+}));
+
+// Hide a room for the requester only (DM sidebar "X" behavior)
+router.post('/:id/hide', asyncHandler(async (req, res) => {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ message: 'Unauthorized' });
+
+  let payload;
+  try {
+    payload = jwt.verify(token, env.jwtSecret);
+  } catch (e) {
+    return res.status(401).json({ message: 'Invalid token' });
+  }
+
+  const id = String(req.params.id || '');
+  if (!id) return res.status(400).json({ message: 'Invalid room id' });
+
+  let roomDoc = null;
+  try { roomDoc = await Room.findById(id).lean().catch(() => null); } catch (e) {}
+  const inMemory = rooms.get(id) || null;
+  if (!roomDoc && !inMemory) return res.status(404).json({ message: 'Room not found' });
+
+  const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+  const canonical = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
+  if (!canonical) return res.status(401).json({ message: 'Unauthorized' });
+
+  const doc = roomDoc || inMemory;
+  const participants = (doc && (doc.participants || doc.members)) || [];
+  const participantSet = new Set(Array.isArray(participants) ? participants.map(String) : []);
+  const isMember = requesterExpanded.some((rid) => participantSet.has(String(rid))) || participantSet.has(String(canonical));
+  if (!isMember) return res.status(403).json({ message: 'You are not a member of this room' });
+
+  try {
+    await Room.findByIdAndUpdate(
+      id,
+      { $addToSet: { hiddenFor: String(canonical) }, $set: { updatedAt: new Date() } },
+      { upsert: false }
+    ).lean();
+  } catch (e) {
+    // best-effort
+  }
+
+  try {
+    const mem = rooms.get(id);
+    if (mem) {
+      const hiddenFor = Array.isArray(mem.hiddenFor) ? mem.hiddenFor.map(String) : [];
+      if (!hiddenFor.includes(String(canonical))) hiddenFor.push(String(canonical));
+      mem.hiddenFor = hiddenFor;
+      rooms.set(id, mem);
+    }
+  } catch (e) {}
+
+  res.json({ message: 'Room hidden' });
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
@@ -100,11 +393,18 @@ router.get('/:id', asyncHandler(async (req, res) => {
 router.post('/:id/join', asyncHandler(async (req, res) => {
   const id = req.params.id;
   const userId = req.body.userId;
-  const room = rooms.get(id);
-  if (!room) return res.status(404).json({ message: 'Room not found' });
-  // enforce bans by checking DB-backed room if present
+  if (!userId) return res.status(400).json({ message: 'userId required' });
+
+  // Prefer DB-backed join so it survives restarts; fall back to in-memory.
+  let roomDoc = null;
+  try { roomDoc = await Room.findById(id).lean().catch(() => null); } catch (e) {}
+
+  const roomMem = rooms.get(id) || null;
+  if (!roomDoc && !roomMem) return res.status(404).json({ message: 'Room not found' });
+
+  // enforce bans using DB doc if present
   try {
-    const doc = await Room.findById(id).lean();
+    const doc = roomDoc;
     const ip = (req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.ip || '').toString().split(',')[0].trim();
     if (doc) {
       // check direct userId ban
@@ -113,7 +413,7 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
       }
       // also check linked guestId for this user (if any)
       try {
-        const u = await User.findById(userId).lean().catch(() => null);
+        const u = await User.findOne({ $or: [{ _id: String(userId) }, { guestId: String(userId) }] }).select('guestId').lean().catch(() => null);
         if (u && u.guestId && Array.isArray(doc.bannedUsers) && doc.bannedUsers.includes(u.guestId)) {
           return res.status(403).json({ message: 'You are banned from this room' });
         }
@@ -123,20 +423,32 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
       }
     }
   } catch (e) {}
-  room.participants = [...new Set([...(room.participants || []), userId])];
-  rooms.set(id, room);
-  try {
-    // update DB if room exists there
-    await Room.findByIdAndUpdate(id, { $addToSet: { participants: userId, members: userId }, $set: { updatedAt: new Date() } }, { upsert: false });
-    // fetch fresh DB doc to avoid returning stale/in-memory-only values
-    const fresh = await Room.findById(id).lean();
-    if (fresh) return res.json({ id: fresh._id, ...fresh });
-  } catch (e) {
-    // ignore DB errors but continue to return in-memory room
-    console.warn('Failed to update DB for join:', e?.message || e);
+
+  // Update DB if present
+  if (roomDoc) {
+    try {
+      await Room.findByIdAndUpdate(
+        id,
+        { $addToSet: { participants: String(userId), members: String(userId) }, $set: { updatedAt: new Date() } },
+        { upsert: false }
+      );
+      const fresh = await Room.findById(id).lean().catch(() => null);
+      if (fresh) {
+        // keep cache lightly in sync
+        try { rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh }); } catch (e) {}
+        return res.json({ id: fresh._id, ...fresh });
+      }
+    } catch (e) {
+      console.warn('Failed to update DB for join:', e?.message || e);
+    }
   }
 
-  res.json(room);
+  // in-memory fallback
+  const next = roomMem || { id, ...(roomDoc || {}) };
+  next.participants = [...new Set([...(next.participants || []), String(userId)])];
+  next.members = [...new Set([...(next.members || []), String(userId)])];
+  rooms.set(id, next);
+  res.json(next);
 }));
 
 // Allow room creator/owner to delete a room (permanent removal)
@@ -161,10 +473,50 @@ router.delete('/:id', asyncHandler(async (req, res) => {
     if (!rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
   }
 
-  // only creator/owner can delete
-  const requesterId = payload.id;
+  // only creator/owner can delete (except DM rooms where participants can delete)
+  // NOTE: user identifiers can be inconsistent across restarts (in-memory id vs Mongo _id vs guestId).
+  // Build a set of equivalent requester identifiers and accept a match on any.
+  const requesterIds = new Set();
+  if (payload?.id) requesterIds.add(String(payload.id));
+
+  try {
+    if (payload?.email) {
+      const uByEmail = await User.findOne({ email: String(payload.email) }).select('_id guestId').lean().catch(() => null);
+      if (uByEmail?._id) requesterIds.add(String(uByEmail._id));
+      if (uByEmail?.guestId) requesterIds.add(String(uByEmail.guestId));
+    }
+  } catch (e) {}
+
+  try {
+    if (payload?.id) {
+      // if payload.id is a Mongo _id OR a guestId, resolve and add both representations
+      const u = await User.findOne({ $or: [{ _id: String(payload.id) }, { guestId: String(payload.id) }] })
+        .select('_id guestId')
+        .lean()
+        .catch(() => null);
+      if (u?._id) requesterIds.add(String(u._id));
+      if (u?.guestId) requesterIds.add(String(u.guestId));
+    }
+  } catch (e) {}
+
   const ownerId = roomDoc ? (roomDoc.createdBy || roomDoc.owner) : null;
-  if (ownerId && ownerId !== requesterId) return res.status(403).json({ message: 'Only room owner can delete this room' });
+  const isDmRoom = Boolean(
+    roomDoc && (
+      roomDoc.type === 'dm' ||
+      roomDoc.category === 'dm' ||
+      (roomDoc.type === 'private' && roomDoc.category === 'dm')
+    )
+  );
+  const participants = (roomDoc && (roomDoc.participants || roomDoc.members)) || [];
+  const participantSet = new Set(Array.isArray(participants) ? participants.map(String) : []);
+  const isParticipant = Array.from(requesterIds).some((rid) => participantSet.has(String(rid)));
+  const isOwner = ownerId ? Array.from(requesterIds).some((rid) => String(ownerId) === String(rid)) : false;
+
+  if (isDmRoom) {
+    if (!isParticipant) return res.status(403).json({ message: 'Only DM participants can delete this conversation' });
+  } else {
+    if (ownerId && !isOwner) return res.status(403).json({ message: 'Only room owner can delete this room' });
+  }
 
   try {
     if (roomDoc) await Room.deleteOne({ _id: id });
@@ -273,12 +625,37 @@ router.post('/:id/mute', asyncHandler(async (req, res) => {
 router.post('/:id/leave', asyncHandler(async (req, res) => {
   const id = req.params.id;
   const userId = req.body.userId;
-  const room = rooms.get(id);
-  if (!room) return res.status(404).json({ message: 'Room not found' });
-  room.participants = (room.participants || []).filter(pid => pid !== userId);
-  rooms.set(id, room);
-  try { await Room.findByIdAndUpdate(id, { $pull: { participants: userId } }); } catch (e) {}
-  res.json(room);
+  if (!userId) return res.status(400).json({ message: 'userId required' });
+
+  // Prefer DB-backed leave so it survives restarts; fall back to in-memory.
+  let roomDoc = null;
+  try { roomDoc = await Room.findById(id).lean().catch(() => null); } catch (e) {}
+  const roomMem = rooms.get(id) || null;
+  if (!roomDoc && !roomMem) return res.status(404).json({ message: 'Room not found' });
+
+  if (roomDoc) {
+    try {
+      await Room.findByIdAndUpdate(
+        id,
+        { $pull: { participants: String(userId), members: String(userId) }, $set: { updatedAt: new Date() } },
+        { upsert: false }
+      );
+      const fresh = await Room.findById(id).lean().catch(() => null);
+      if (fresh) {
+        try { rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh }); } catch (e) {}
+        return res.json({ id: fresh._id, ...fresh });
+      }
+    } catch (e) {
+      console.warn('Failed to update DB for leave:', e?.message || e);
+    }
+  }
+
+  // in-memory fallback
+  const next = roomMem || { id, ...(roomDoc || {}) };
+  next.participants = (next.participants || []).map(String).filter(pid => pid !== String(userId));
+  next.members = (next.members || []).map(String).filter(mid => mid !== String(userId));
+  rooms.set(id, next);
+  res.json(next);
 }));
 
 // Update room settings / metadata
@@ -304,10 +681,17 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     const roomDoc = await Room.findById(id).lean();
     if (!roomDoc) return res.status(404).json({ message: 'Room not found' });
 
-    const requesterId = payload.id;
+    const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+    const requesterSet = new Set(uniqStrings(requesterExpanded));
+    const requesterCanonical = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
+    if (requesterCanonical) requesterSet.add(String(requesterCanonical));
+
     const ownerId = roomDoc.createdBy || roomDoc.owner;
-    const isAdmin = Array.isArray(roomDoc.admins) && roomDoc.admins.includes(requesterId);
-    if (ownerId && ownerId !== requesterId && !isAdmin) return res.status(403).json({ message: 'Only room owner or admins can update settings' });
+    const admins = Array.isArray(roomDoc.admins) ? roomDoc.admins.map(String).filter(Boolean) : [];
+
+    const isOwner = ownerId ? Array.from(requesterSet).some((rid) => String(ownerId) === String(rid)) : false;
+    const isAdmin = admins.length ? Array.from(requesterSet).some((rid) => admins.includes(String(rid))) : false;
+    if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Only room owner or admins can update settings' });
 
     // merge settings if provided
     if (setObj.settings && roomDoc.settings) {
@@ -316,7 +700,10 @@ router.patch('/:id', asyncHandler(async (req, res) => {
 
     setObj.updatedAt = new Date();
     const updated = await Room.findByIdAndUpdate(id, { $set: setObj }, { new: true }).lean();
-    if (updated) return res.json({ id: updated._id, ...updated });
+    if (updated) {
+      try { rooms.set(String(updated._id), { id: String(updated._id), ...updated }); } catch (e) {}
+      return res.json({ id: updated._id, ...updated });
+    }
   } catch (e) {
     console.warn('Failed to update room', e?.message || e);
     return res.status(500).json({ message: 'Failed to update room' });
@@ -326,12 +713,98 @@ router.patch('/:id', asyncHandler(async (req, res) => {
 }));
 
 router.post('/dm', requireVerifiedForHighRisk, asyncHandler(async (req, res) => {
+  // Always trust the authenticated user as the DM creator (prevents inconsistent/forged ids)
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ message: 'Unauthorized' });
+  let payload;
+  try {
+    payload = jwt.verify(token, env.jwtSecret);
+  } catch (e) {
+    return res.status(401).json({ message: 'Invalid token' });
+  }
+
+  const requesterIdRaw = payload?.id;
+  const targetIdRaw = req.body?.userId2;
+  if (!requesterIdRaw || !targetIdRaw) {
+    return res.status(400).json({ message: 'userId2 required' });
+  }
+
+  const requesterId = await canonicalIdForAuthPayload(payload);
+  const targetId = await canonicalIdForUser(targetIdRaw);
+
+  // Reuse existing DM if already created for this pair
+  const requesterIds = await expandUserIdentifiers({ id: requesterId, email: payload?.email });
+  const targetIds = await expandUserIdentifiers({ id: targetId, email: null });
+
+  // Prevent self-DM even if ids are in different forms (guestId vs Mongo _id)
+  const requesterSet = new Set(uniqStrings(requesterIds));
+  const targetSet = new Set(uniqStrings(targetIds));
+  for (const rid of requesterSet) {
+    if (targetSet.has(rid)) {
+      return res.status(400).json({ message: 'You cannot start a DM with yourself' });
+    }
+  }
+
+  // Block enforcement: if either side has blocked the other, do not allow DM creation.
+  try {
+    const blocked = await isBlockedEitherWay({ aId: requesterId, aIds: Array.from(requesterSet), bId: targetId, bIds: Array.from(targetSet) });
+    if (blocked) return res.status(403).json({ message: 'Cannot start DM: one of the users has blocked the other' });
+  } catch (e) {
+    // best-effort
+  }
+
+  // Privacy enforcement: if target only allows friends to DM, require friendship.
+  try {
+    const targetDoc = await User.findOne({ $or: [{ _id: String(targetId) }, { guestId: String(targetId) }] })
+      .select('settings friends')
+      .lean()
+      .catch(() => null);
+    const dmScope = targetDoc?.settings?.privacy?.dmScope || 'everyone';
+    if (dmScope === 'friends') {
+      const friends = Array.isArray(targetDoc?.friends) ? targetDoc.friends.map(String).filter(Boolean) : [];
+      const ok = Array.from(requesterSet).some((rid) => friends.includes(String(rid)));
+      if (!ok) {
+        return res.status(403).json({ message: 'Only friends can send private messages.' });
+      }
+    }
+  } catch (e) {
+    // best-effort
+  }
+
+  const comboOr = [];
+  for (const a of requesterSet) {
+    for (const b of targetSet) {
+      comboOr.push({ participants: { $all: [a, b] } });
+      comboOr.push({ members: { $all: [a, b] } });
+    }
+  }
+
+  try {
+    const baseFilter = {
+      category: 'dm',
+      $or: [{ type: 'dm' }, { type: 'private' }]
+    };
+    const filter = comboOr.length ? { $and: [baseFilter, { $or: comboOr }] } : baseFilter;
+    const existing = await Room.findOne(filter).sort({ updatedAt: -1, createdAt: -1 }).lean().exec();
+
+    if (existing && existing._id) {
+      // Keep in-memory cache lightly in sync
+      try { rooms.set(String(existing._id), { id: String(existing._id), ...existing }); } catch (e) {}
+      return res.json({ id: existing._id, ...existing });
+    }
+  } catch (e) {
+    // If lookup fails, fall through to creating a new DM
+  }
+
   const id = `dm-${Date.now()}`;
   // Store DM rooms as private rooms with category 'dm' so they are not listed as public
-  const room = { id, type: 'private', category: 'dm', participants: [req.body.userId1, req.body.userId2] };
+  const participants = [String(requesterId), String(targetId)];
+  const room = { id, type: 'private', category: 'dm', participants };
+
   // persist
   try {
-    const doc = new Room({ _id: id, name: `DM:${req.body.userId1}:${req.body.userId2}`, type: 'private', category: 'dm', participants: room.participants, members: room.participants, createdBy: req.body.userId1 });
+    const doc = new Room({ _id: id, name: `DM:${participants[0]}:${participants[1]}`, type: 'private', category: 'dm', participants, members: participants, createdBy: requesterId });
     await doc.save();
   } catch (e) { console.warn('Could not persist DM room', e?.message || e); }
   rooms.set(id, room);

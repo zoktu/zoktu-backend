@@ -17,6 +17,7 @@ const RoomSchema = new mongoose.Schema({
   mutedIPs: [{ ip: String, until: Date }],
   settings: { type: Object },
   category: String,
+  hiddenFor: [String],
   isActive: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }

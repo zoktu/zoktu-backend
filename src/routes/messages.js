@@ -4,6 +4,7 @@ import { getModelForRoom, RoomMessage, DMMessage, RandomMessage } from '../model
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import Room from '../models/Room.js';
+import User from '../models/User.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
 
 const router = Router();
@@ -47,6 +48,164 @@ const registerUserMessage = (userId) => {
   return null;
 };
 
+const getAuthPayload = (req) => {
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token) return null;
+    return jwt.verify(token, env.jwtSecret);
+  } catch (e) {
+    return null;
+  }
+};
+
+const looksLikeObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
+
+const isDmRoomDoc = (doc) => Boolean(
+  doc && (
+    doc.type === 'dm' ||
+    doc.category === 'dm' ||
+    (doc.type === 'private' && doc.category === 'dm')
+  )
+);
+
+const getExpandedBlockedSetForUserId = async (userId) => {
+  if (!userId) return new Set();
+  try {
+    const u = await User.findOne({ $or: [{ _id: String(userId) }, { guestId: String(userId) }] })
+      .select('blockedUsers')
+      .lean()
+      .catch(() => null);
+    const raw = Array.isArray(u?.blockedUsers) ? u.blockedUsers.map(String).filter(Boolean) : [];
+    const out = new Set(raw);
+
+    const objectIdCandidates = raw.filter((v) => looksLikeObjectId(v));
+    const guestIdCandidates = raw.filter((v) => String(v).startsWith('guest-'));
+    if (objectIdCandidates.length || guestIdCandidates.length) {
+      const docs = await User.find({
+        $or: [
+          ...(objectIdCandidates.length ? [{ _id: { $in: objectIdCandidates } }] : []),
+          ...(guestIdCandidates.length ? [{ guestId: { $in: guestIdCandidates } }] : [])
+        ]
+      })
+        .select('_id guestId')
+        .lean()
+        .exec();
+      for (const d of docs || []) {
+        if (d?._id) out.add(String(d._id));
+        if (d?.guestId) out.add(String(d.guestId));
+      }
+    }
+
+    return out;
+  } catch (e) {
+    return new Set();
+  }
+};
+
+const getExpandedBlockedSetForAuth = async (auth) => {
+  try {
+    if (!auth?.payload) return new Set();
+
+    const or = [];
+    if (auth.payload.email) or.push({ email: String(auth.payload.email) });
+    if (auth.primary && looksLikeObjectId(auth.primary)) or.push({ _id: String(auth.primary) });
+    if (auth.primary) or.push({ guestId: String(auth.primary) });
+
+    const me = or.length ? await User.findOne({ $or: or }).select('blockedUsers').lean().catch(() => null) : null;
+    const raw = Array.isArray(me?.blockedUsers) ? me.blockedUsers.map(String).filter(Boolean) : [];
+    const out = new Set(raw);
+
+    const objectIdCandidates = raw.filter((v) => looksLikeObjectId(v));
+    const guestIdCandidates = raw.filter((v) => String(v).startsWith('guest-'));
+    if (objectIdCandidates.length || guestIdCandidates.length) {
+      const docs = await User.find({
+        $or: [
+          ...(objectIdCandidates.length ? [{ _id: { $in: objectIdCandidates } }] : []),
+          ...(guestIdCandidates.length ? [{ guestId: { $in: guestIdCandidates } }] : [])
+        ]
+      })
+        .select('_id guestId')
+        .lean()
+        .exec();
+      for (const d of docs || []) {
+        if (d?._id) out.add(String(d._id));
+        if (d?.guestId) out.add(String(d.guestId));
+      }
+    }
+
+    return out;
+  } catch (e) {
+    return new Set();
+  }
+};
+
+// Returns a primary (best) id + a set of equivalent ids that should be treated as "the same user".
+// This fixes mismatches between JWT payload id vs Mongo _id vs guestId.
+const getAuthIdentity = async (req) => {
+  const payload = getAuthPayload(req);
+  if (!payload) return null;
+
+  const ids = new Set();
+  const add = (v) => {
+    if (v === undefined || v === null) return;
+    const s = String(v).trim();
+    if (!s) return;
+    ids.add(s);
+  };
+
+  add(payload.id);
+  add(payload.userId);
+  add(payload._id);
+  add(payload.guestId);
+  if (payload.email) add(String(payload.email).toLowerCase());
+
+  // Expand from email -> user record
+  try {
+    const email = payload.email ? String(payload.email).toLowerCase() : null;
+    if (email) {
+      const u = await User.findOne({ email }).lean().catch(() => null);
+      if (u) {
+        add(u._id);
+        add(u.guestId);
+        if (u.email) add(String(u.email).toLowerCase());
+      }
+    }
+  } catch (e) {}
+
+  // Expand from payload.id if it's a mongo _id
+  try {
+    if (payload.id && looksLikeObjectId(payload.id)) {
+      const u = await User.findById(String(payload.id)).lean().catch(() => null);
+      if (u) {
+        add(u._id);
+        add(u.guestId);
+        if (u.email) add(String(u.email).toLowerCase());
+      }
+    }
+  } catch (e) {}
+
+  const primary = (
+    (payload.id ? String(payload.id) : null) ||
+    (payload._id ? String(payload._id) : null) ||
+    (payload.userId ? String(payload.userId) : null) ||
+    (payload.guestId ? String(payload.guestId) : null) ||
+    (payload.email ? String(payload.email).toLowerCase() : null)
+  );
+
+  return { payload, ids: Array.from(ids), primary };
+};
+
+const findMessageDocById = async (id) => {
+  let doc = await RoomMessage.findById(id).catch(() => null);
+  if (doc) return { doc, Model: RoomMessage };
+  doc = await DMMessage.findById(id).catch(() => null);
+  if (doc) return { doc, Model: DMMessage };
+  doc = await RandomMessage.findById(id).catch(() => null);
+  if (doc) return { doc, Model: RandomMessage };
+  return { doc: null, Model: null };
+};
+
 router.get('/rooms/:roomId/messages', (req, res) => {
   const roomId = req.params.roomId;
   const ip = req.ip || req.connection.remoteAddress || 'unknown';
@@ -65,29 +224,49 @@ router.get('/rooms/:roomId/messages', (req, res) => {
       const roomDoc = await Room.findById(roomId).lean().catch(() => null);
       const Model = getModelForRoom(roomDoc);
       const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
-      const docs = await Model.find({ roomId }).sort({ createdAt: -1 }).limit(limit).lean();
-      // identify current user from Authorization header (optional)
-      let currentUserId = null;
-      try {
-        const header = req.headers.authorization || '';
-        const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-        if (token) {
-          const payload = jwt.verify(token, env.jwtSecret);
-          currentUserId = payload?.id || null;
-        }
-      } catch (e) {
-        currentUserId = null;
+      let docs = await Model.find({ roomId }).sort({ createdAt: -1 }).limit(limit).lean();
+
+      // identify current user (optional) and filter blocked users' messages
+      const auth = await getAuthIdentity(req);
+      const blockedSet = auth?.primary ? await getExpandedBlockedSetForAuth(auth) : new Set();
+      if (blockedSet.size) {
+        docs = (docs || []).filter((d) => !blockedSet.has(String(d.senderId)));
+      }
+
+      const currentUserIds = auth?.ids || [];
+      if (currentUserIds.length) {
+        docs = (docs || []).filter((d) => {
+          const meta = d?.meta || {};
+          const hiddenFor = Array.isArray(meta.hiddenFor) ? meta.hiddenFor.map(String) : [];
+          if (!hiddenFor.length) return true;
+          return !hiddenFor.some((id) => currentUserIds.includes(String(id)));
+        });
       }
 
       const mapped = docs.reverse().map(d => {
         const meta = d.meta || {};
         let viewedEntry = null;
-        if (currentUserId && Array.isArray(meta.viewed)) {
-          viewedEntry = meta.viewed.find(v => v.userId === currentUserId) || null;
+        if (currentUserIds.length && Array.isArray(meta.viewed)) {
+          viewedEntry = meta.viewed.find(v => currentUserIds.includes(String(v.userId))) || null;
         }
         const expireAt = viewedEntry ? (viewedEntry.expireAt ? new Date(viewedEntry.expireAt).toISOString() : null) : null;
         const expiredForYou = expireAt ? (Date.now() > new Date(expireAt).getTime()) : false;
-        return ({ id: d._id.toString(), roomId: d.roomId, senderId: d.senderId, senderName: d.senderName, content: d.content, type: d.type, timestamp: d.createdAt, meta, viewedByCurrentUser: Boolean(viewedEntry), expireAt, expiredForCurrentUser: expiredForYou });
+        return ({
+          id: d._id.toString(),
+          roomId: d.roomId,
+          senderId: d.senderId,
+          senderName: d.senderName,
+          content: d.content,
+          type: d.type,
+          replyTo: d.replyTo,
+          timestamp: d.createdAt,
+          editedAt: d.editedAt,
+          reactions: Array.isArray(d.reactions) ? d.reactions : [],
+          meta,
+          viewedByCurrentUser: Boolean(viewedEntry),
+          expireAt,
+          expiredForCurrentUser: expiredForYou
+        });
       });
       res.json(mapped);
     } catch (e) {
@@ -98,9 +277,50 @@ router.get('/rooms/:roomId/messages', (req, res) => {
   })();
 });
 
+// Hide a message for the current user ("delete for me")
+router.post('/messages/:id/hide', asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const { doc } = await findMessageDocById(id);
+  if (!doc) return res.status(404).json({ message: 'Message not found' });
+
+  const meta = doc.meta || {};
+  meta.hiddenFor = Array.isArray(meta.hiddenFor) ? meta.hiddenFor : [];
+  const exists = meta.hiddenFor.some((v) => String(v) === String(auth.primary));
+  if (!exists) meta.hiddenFor.push(String(auth.primary));
+  doc.meta = meta;
+  await doc.save();
+
+  res.json({ message: 'hidden', id: doc._id.toString() });
+}));
+
+// Clear all messages in a room for the current user ("clear for me")
+router.post('/rooms/:roomId/messages/clear-for-me', asyncHandler(async (req, res) => {
+  const roomId = req.params.roomId;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+  const Model = getModelForRoom(roomDoc);
+  await Model.updateMany(
+    { roomId },
+    { $addToSet: { 'meta.hiddenFor': String(auth.primary) } }
+  ).exec();
+
+  res.json({ message: 'cleared', roomId });
+}));
+
 router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(async (req, res) => {
   const roomId = req.params.roomId;
-  const { senderId, content } = req.body || {};
+  const { senderId, content, replyTo } = req.body || {};
+
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  // Prevent spoofing senderId; if provided senderId isn't one of your equivalent ids, fall back to canonical id.
+  const senderIdEffective = (senderId && auth.ids.includes(String(senderId))) ? String(senderId) : String(auth.primary);
   // word limit check
   const words = (content || '').trim().split(/\s+/).filter(Boolean).length;
   if (words > MAX_WORDS) {
@@ -108,8 +328,8 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   }
 
   // mute check
-  if (isUserMuted(senderId)) {
-    const until = mutedUsers.get(senderId);
+  if (isUserMuted(senderIdEffective)) {
+    const until = mutedUsers.get(senderIdEffective);
     return res.status(403).json({ message: 'You are muted for spamming', mutedUntil: until });
   }
 
@@ -119,7 +339,12 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     const roomDoc = await Room.findById(roomId).lean().catch(() => null);
     if (roomDoc) {
       // check direct userId ban
-      if (Array.isArray(roomDoc.bannedUsers) && senderId && roomDoc.bannedUsers.includes(senderId)) {
+      if (Array.isArray(roomDoc.bannedUsers) && auth?.ids?.length) {
+        const banned = auth.ids.some(id => roomDoc.bannedUsers.includes(id));
+        if (banned) return res.status(403).json({ message: 'You are banned from this room' });
+      }
+
+      if (Array.isArray(roomDoc.bannedUsers) && senderIdEffective && roomDoc.bannedUsers.includes(senderIdEffective)) {
         return res.status(403).json({ message: 'You are banned from this room' });
       }
       // check user's linked guestId
@@ -133,8 +358,12 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
         return res.status(403).json({ message: 'Your IP is banned from this room' });
       }
       // check mutedUsers array
-      if (Array.isArray(roomDoc.mutedUsers) && senderId) {
-        const mu = roomDoc.mutedUsers.find(m => m.userId === senderId && new Date(m.until) > new Date());
+      if (Array.isArray(roomDoc.mutedUsers) && senderIdEffective) {
+        const mu = roomDoc.mutedUsers.find(m => String(m.userId) === String(senderIdEffective) && new Date(m.until) > new Date());
+        if (mu) return res.status(403).json({ message: 'You are muted in this room', mutedUntil: mu.until });
+      }
+      if (Array.isArray(roomDoc.mutedUsers) && auth?.ids?.length) {
+        const mu = roomDoc.mutedUsers.find(m => auth.ids.includes(String(m.userId)) && new Date(m.until) > new Date());
         if (mu) return res.status(403).json({ message: 'You are muted in this room', mutedUntil: mu.until });
       }
       if (Array.isArray(roomDoc.mutedIPs) && ip) {
@@ -147,57 +376,189 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   }
 
   // register message for rate tracking
-  const muteStart = registerUserMessage(senderId);
+  const muteStart = registerUserMessage(senderIdEffective);
   if (muteStart) {
     return res.status(403).json({ message: 'You have been muted for 5 minutes due to spam', mutedUntil: muteStart });
   }
 
   // persist to DB using correct model for the room
   const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+
+  // Block enforcement for DMs: if either side has blocked the other, do not allow sending.
+  try {
+    if (isDmRoomDoc(roomDoc)) {
+      const participants = (roomDoc?.participants || roomDoc?.members || []).map(String).filter(Boolean);
+      const other = participants.find((p) => !auth.ids.includes(String(p))) || null;
+      if (other) {
+        const senderBlocked = await getExpandedBlockedSetForUserId(senderIdEffective);
+        const otherBlocked = await getExpandedBlockedSetForUserId(other);
+
+        const senderIds = Array.from(new Set([String(senderIdEffective), ...(auth.ids || []).map(String)]));
+        const either =
+          senderBlocked.has(String(other)) ||
+          senderIds.some((sid) => otherBlocked.has(String(sid)));
+        if (either) {
+          return res.status(403).json({ message: 'Cannot send DM: one of the users has blocked the other' });
+        }
+      }
+    }
+  } catch (e) {
+    // best-effort
+  }
+
+  // Privacy enforcement for DMs: if the other user only allows friends to DM, require friendship.
+  try {
+    if (isDmRoomDoc(roomDoc)) {
+      const participants = (roomDoc?.participants || roomDoc?.members || []).map(String).filter(Boolean);
+      const other = participants.find((p) => !auth.ids.includes(String(p))) || null;
+      if (other) {
+        const otherDoc = await User.findOne({ $or: [{ _id: String(other) }, { guestId: String(other) }] })
+          .select('settings friends')
+          .lean()
+          .catch(() => null);
+
+        const dmScope = otherDoc?.settings?.privacy?.dmScope || 'everyone';
+        if (dmScope === 'friends') {
+          const friends = Array.isArray(otherDoc?.friends) ? otherDoc.friends.map(String).filter(Boolean) : [];
+          const senderIds = Array.from(new Set([String(senderIdEffective), ...(auth.ids || []).map(String)]));
+          const isFriend = senderIds.some((sid) => friends.includes(String(sid)));
+          if (!isFriend) {
+            return res.status(403).json({ message: 'Only friends can send private messages.' });
+          }
+        }
+      }
+    }
+  } catch (e) {
+    // best-effort
+  }
+
   const Model = getModelForRoom(roomDoc);
-  const doc = new Model({ roomId, senderId, senderName: req.body.senderName || '', content, type: req.body.type || 'text' });
+  const doc = new Model({
+    roomId,
+    senderId: senderIdEffective,
+    senderName: req.body.senderName || '',
+    content,
+    type: req.body.type || 'text',
+    replyTo: replyTo ? String(replyTo) : undefined
+  });
   await doc.save();
   // keep in-memory cache for quick reads (optional)
   try {
     const list = messages.get(roomId) || [];
-    list.push({ id: doc._id.toString(), roomId, senderId, senderName: doc.senderName, content: doc.content, timestamp: doc.createdAt.toISOString() });
+    list.push({ id: doc._id.toString(), roomId, senderId: doc.senderId, senderName: doc.senderName, content: doc.content, timestamp: doc.createdAt.toISOString(), replyTo: doc.replyTo });
     messages.set(roomId, list);
   } catch (e) {}
-  res.json({ id: doc._id.toString(), roomId, senderId, senderName: doc.senderName, content: doc.content, timestamp: doc.createdAt.toISOString() });
+  res.json({ id: doc._id.toString(), roomId, senderId: doc.senderId, senderName: doc.senderName, content: doc.content, timestamp: doc.createdAt.toISOString(), replyTo: doc.replyTo });
 }));
 
-router.patch('/messages/:id', (req, res) => {
-  const updated = { id: req.params.id, ...req.body, isEdited: true, editedAt: new Date().toISOString() };
-  res.json(updated);
-});
+router.patch('/messages/:id', asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
 
-router.delete('/messages/:id', (req, res) => {
-  res.json({ message: 'deleted', id: req.params.id });
-});
+  const content = (req.body?.content ?? req.body?.message ?? '').toString();
+  if (!content.trim()) return res.status(400).json({ message: 'content required' });
 
-router.post('/messages/:id/reactions', (req, res) => {
-  res.json({ message: 'reaction added', emoji: req.body.emoji, userId: req.body.userId });
-});
+  const { doc } = await findMessageDocById(id);
+  if (!doc) return res.status(404).json({ message: 'Message not found' });
+  const allowed = auth.ids.includes(String(doc.senderId));
+  if (!allowed) return res.status(403).json({ message: 'Forbidden' });
 
-router.delete('/messages/:id/reactions', (req, res) => {
-  res.json({ message: 'reaction removed', emoji: req.body?.emoji, userId: req.body?.userId });
-});
+  if (doc?.meta && doc.meta.deleted) return res.status(400).json({ message: 'Message is deleted' });
+
+  doc.content = content;
+  doc.editedAt = new Date();
+  await doc.save();
+  res.json({ id: doc._id.toString(), roomId: doc.roomId, senderId: doc.senderId, senderName: doc.senderName, content: doc.content, type: doc.type, replyTo: doc.replyTo, timestamp: doc.createdAt, editedAt: doc.editedAt, reactions: Array.isArray(doc.reactions) ? doc.reactions : [], meta: doc.meta || {} });
+}));
+
+router.delete('/messages/:id', asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const { doc, Model } = await findMessageDocById(id);
+  if (!doc) return res.status(404).json({ message: 'Message not found' });
+  const allowed = auth.ids.includes(String(doc.senderId));
+  if (!allowed) return res.status(403).json({ message: 'Forbidden' });
+
+  // For DM rooms: soft-delete so both sides see "Message deleted" (instead of disappearing).
+  try {
+    const roomDoc = await Room.findById(String(doc.roomId)).lean().catch(() => null);
+    const isDmByModel = Boolean(Model && DMMessage && Model === DMMessage);
+    if (isDmByModel || isDmRoomDoc(roomDoc)) {
+      const meta = doc.meta || {};
+      meta.deleted = true;
+      meta.deletedAt = new Date();
+      meta.deletedBy = String(auth.primary);
+      doc.meta = meta;
+      doc.content = '';
+      await doc.save();
+
+      // Best-effort: keep in-memory cache consistent if it exists
+      try {
+        const list = messages.get(String(doc.roomId)) || [];
+        const idx = list.findIndex(m => String(m.id) === String(id));
+        if (idx !== -1) {
+          list[idx] = { ...list[idx], content: '', meta: { ...(list[idx].meta || {}), deleted: true, deletedAt: meta.deletedAt, deletedBy: meta.deletedBy } };
+          messages.set(String(doc.roomId), list);
+        }
+      } catch (e) {}
+
+      return res.json({ message: 'deleted', id, soft: true });
+    }
+  } catch (e) {
+    // fall through to hard-delete
+  }
+
+  await Model.deleteOne({ _id: doc._id });
+  res.json({ message: 'deleted', id, soft: false });
+}));
+
+router.post('/messages/:id/reactions', asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const emoji = (req.body?.emoji || '').toString();
+  if (!emoji) return res.status(400).json({ message: 'emoji required' });
+
+  const { doc } = await findMessageDocById(id);
+  if (!doc) return res.status(404).json({ message: 'Message not found' });
+
+  doc.reactions = Array.isArray(doc.reactions) ? doc.reactions : [];
+  const exists = doc.reactions.find(r => String(r.emoji) === emoji && auth.ids.includes(String(r.userId)));
+  if (!exists) {
+    doc.reactions.push({ emoji, userId: String(auth.primary), createdAt: new Date() });
+    await doc.save();
+  }
+
+  res.json({ message: 'reaction added', id: doc._id.toString(), reactions: Array.isArray(doc.reactions) ? doc.reactions : [] });
+}));
+
+router.delete('/messages/:id/reactions', asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const emoji = (req.query?.emoji || '').toString();
+  if (!emoji) return res.status(400).json({ message: 'emoji required' });
+
+  const { doc } = await findMessageDocById(id);
+  if (!doc) return res.status(404).json({ message: 'Message not found' });
+
+  doc.reactions = Array.isArray(doc.reactions) ? doc.reactions : [];
+  doc.reactions = doc.reactions.filter(r => !(String(r.emoji) === emoji && auth.ids.includes(String(r.userId))));
+  await doc.save();
+
+  res.json({ message: 'reaction removed', id: doc._id.toString(), reactions: Array.isArray(doc.reactions) ? doc.reactions : [] });
+}));
 
 // Mark a message as viewed by the current user (per-user ephemeral view)
 router.post('/messages/:id/view', asyncHandler(async (req, res) => {
   const id = req.params.id;
-  // require auth
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-  if (!token) return res.status(401).json({ message: 'Unauthorized' });
-  let payload;
-  try {
-    payload = jwt.verify(token, env.jwtSecret);
-  } catch (e) {
-    return res.status(401).json({ message: 'Invalid token' });
-  }
-  const userId = payload?.id;
-  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
 
   const durationSeconds = Number(req.body?.durationSeconds) || 10; // default 10s
   const expireAt = new Date(Date.now() + Math.max(1, durationSeconds) * 1000);
@@ -210,13 +571,13 @@ router.post('/messages/:id/view', asyncHandler(async (req, res) => {
 
   const meta = doc.meta || {};
   meta.viewed = Array.isArray(meta.viewed) ? meta.viewed : [];
-  const existing = meta.viewed.find(v => v.userId === userId);
+  const existing = meta.viewed.find(v => auth.ids.includes(String(v.userId)));
   const now = new Date();
   if (existing) {
     existing.viewedAt = now;
     existing.expireAt = expireAt;
   } else {
-    meta.viewed.push({ userId, viewedAt: now, expireAt });
+    meta.viewed.push({ userId: String(auth.primary), viewedAt: now, expireAt });
   }
   doc.meta = meta;
   await doc.save();

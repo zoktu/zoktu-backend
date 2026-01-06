@@ -11,6 +11,7 @@ import { Server as IOServer } from 'socket.io';
 import { messages } from './routes/messages.js';
 import Message from './models/Message.js';
 import Room from './models/Room.js';
+import User from './models/User.js';
 
 const app = express();
 
@@ -36,6 +37,7 @@ const io = new IOServer(httpServer, {
 
 // Simple in-memory socket registries and waiting queue for random pairing
 const socketsByUser = new Map(); // userId -> socket
+const socketCountByUser = new Map(); // userId -> count (supports multiple tabs/devices)
 const waitingSockets = [];
 // Per-user message rate tracking and mute map (same rules as REST)
 const userMessageWindow = new Map(); // userId -> { count, windowStart }
@@ -72,12 +74,87 @@ const registerUserMessage = (userId) => {
   return null;
 };
 
+const markUserPresence = async (uid, isOnline) => {
+  const id = uid ? String(uid) : '';
+  if (!id) return;
+  try {
+    await User.findOneAndUpdate(
+      { $or: [{ _id: id }, { guestId: id }, { email: id }] },
+      {
+        $set: {
+          isOnline: Boolean(isOnline),
+          ...(isOnline ? {} : { lastSeen: new Date() })
+        }
+      },
+      { new: false }
+    ).lean();
+  } catch (e) {
+    // best-effort; ignore
+  }
+};
+
 io.on('connection', (socket) => {
   const userId = socket.handshake.query?.userId || socket.handshake.auth?.userId || null;
-  if (userId) socketsByUser.set(userId, socket);
+  const effectiveUserId = userId ? String(userId) : null;
+  if (effectiveUserId) {
+    socketsByUser.set(effectiveUserId, socket);
+    socketCountByUser.set(effectiveUserId, (socketCountByUser.get(effectiveUserId) || 0) + 1);
+    markUserPresence(effectiveUserId, true);
+    io.emit('presence:update', { userId: effectiveUserId, isOnline: true });
+  }
+
+  // Allow clients (REST-created rooms/DMs) to join a room for realtime events
+  socket.on('room:join', (data) => {
+    try {
+      const roomId = data?.roomId ? String(data.roomId) : null;
+      if (!roomId) return;
+      socket.join(roomId);
+    } catch (e) {}
+  });
+
+  socket.on('room:leave', (data) => {
+    try {
+      const roomId = data?.roomId ? String(data.roomId) : null;
+      if (!roomId) return;
+      socket.leave(roomId);
+    } catch (e) {}
+  });
+
+  // Typing indicators (no persistence)
+  socket.on('room:typing', (data) => {
+    try {
+      const roomId = data?.roomId ? String(data.roomId) : null;
+      if (!roomId) return;
+      const fromUserId = data?.userId ? String(data.userId) : (userId ? String(userId) : null);
+      const fromUserName = data?.userName ? String(data.userName) : '';
+      socket.to(roomId).emit('room:typing', { roomId, userId: fromUserId, userName: fromUserName });
+    } catch (e) {}
+  });
+
+  socket.on('room:typing-stop', (data) => {
+    try {
+      const roomId = data?.roomId ? String(data.roomId) : null;
+      if (!roomId) return;
+      const fromUserId = data?.userId ? String(data.userId) : (userId ? String(userId) : null);
+      const fromUserName = data?.userName ? String(data.userName) : '';
+      socket.to(roomId).emit('room:typing-stop', { roomId, userId: fromUserId, userName: fromUserName });
+    } catch (e) {}
+  });
 
   socket.on('disconnect', () => {
-    try { if (userId) socketsByUser.delete(userId); } catch (e) {}
+    try {
+      if (effectiveUserId) {
+        const next = (socketCountByUser.get(effectiveUserId) || 1) - 1;
+        if (next <= 0) {
+          socketCountByUser.delete(effectiveUserId);
+          socketsByUser.delete(effectiveUserId);
+          markUserPresence(effectiveUserId, false);
+          io.emit('presence:update', { userId: effectiveUserId, isOnline: false });
+        } else {
+          socketCountByUser.set(effectiveUserId, next);
+        }
+      }
+    } catch (e) {}
     // remove from waiting queue if present
     const idx = waitingSockets.findIndex(w => w.socket.id === socket.id);
     if (idx !== -1) waitingSockets.splice(idx, 1);
@@ -87,7 +164,7 @@ io.on('connection', (socket) => {
       for (const roomId of socket.rooms) {
         if (roomId === socket.id) continue;
         // emit to remaining members
-        socket.to(roomId).emit('room:partner-left', { roomId, userId });
+        socket.to(roomId).emit('room:partner-left', { roomId, userId: effectiveUserId || userId });
       }
     } catch (e) {}
   });

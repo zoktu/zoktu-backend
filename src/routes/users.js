@@ -1,24 +1,276 @@
 import { Router } from 'express';
+import jwt from 'jsonwebtoken';
+import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { users, persistUserToDb } from '../lib/userStore.js';
+import User from '../models/User.js';
 
 const router = Router();
 
+const uniqStrings = (arr) => Array.from(new Set((arr || []).filter(Boolean).map((v) => String(v))));
+
+const uniqUsers = (list) => {
+  const seen = new Set();
+  const out = [];
+  for (const u of list || []) {
+    if (!u) continue;
+    const key = String(u.id || u.guestId || u._id || u.email || u.displayName || '').trim();
+    if (!key) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(u);
+  }
+  return out;
+};
+
+const matchesSearch = (u, termLower) => {
+  const fields = [u.displayName, u.username, u.name, u.email, u.guestId, u.id];
+  return fields.some((v) => (v ? String(v).toLowerCase().includes(termLower) : false));
+};
+
+const getAuthPayload = (req) => {
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token) return null;
+    return jwt.verify(token, env.jwtSecret);
+  } catch (e) {
+    return null;
+  }
+};
+
+const looksLikeObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
+
+const getViewerIdsFromReq = async (req) => {
+  const payload = getAuthPayload(req);
+  const ids = new Set();
+  if (!payload) return ids;
+
+  if (payload.id) ids.add(String(payload.id));
+  if (payload.guestId) ids.add(String(payload.guestId));
+  if (payload.userId) ids.add(String(payload.userId));
+  if (payload._id) ids.add(String(payload._id));
+
+  const or = [];
+  if (payload.email) or.push({ email: String(payload.email) });
+  if (payload.id) {
+    or.push({ guestId: String(payload.id) });
+    if (looksLikeObjectId(payload.id)) or.push({ _id: String(payload.id) });
+  }
+  if (payload.guestId) or.push({ guestId: String(payload.guestId) });
+  if (payload.userId) or.push({ guestId: String(payload.userId) });
+  if (payload._id) or.push({ _id: String(payload._id) });
+
+  if (or.length) {
+    try {
+      const doc = await User.findOne({ $or: or }).select('_id guestId').lean().exec().catch(() => null);
+      if (doc?._id) ids.add(String(doc._id));
+      if (doc?.guestId) ids.add(String(doc.guestId));
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  return ids;
+};
+
+const shouldHideProfilePhoto = ({ viewerIds, targetUser }) => {
+  if (!targetUser) return false;
+  const visibility =
+    targetUser?.settings?.privacy?.profilePhotoVisibility ||
+    targetUser?.settings?.profilePhotoVisibility ||
+    'everyone';
+
+  if (visibility !== 'friends') return false;
+
+  const targetIds = uniqStrings([targetUser.id, targetUser._id, targetUser.guestId]);
+  const viewer = new Set(uniqStrings(Array.from(viewerIds || [])));
+  const isSelf = targetIds.some((tid) => viewer.has(String(tid)));
+  if (isSelf) return false;
+
+  const friends = Array.isArray(targetUser?.friends) ? targetUser.friends.map(String).filter(Boolean) : [];
+  const canSee = Array.from(viewer).some((vid) => friends.includes(String(vid)));
+  return !canSee;
+};
+
+const filterUserForViewer = ({ viewerIds, user }) => {
+  if (!user) return user;
+  if (!shouldHideProfilePhoto({ viewerIds, targetUser: user })) return user;
+  return { ...user, avatar: null, photoURL: null };
+};
+
 // Return all users known in-memory (seeded from DB at startup)
-router.get('/', (req, res) => {
-  const list = Array.from(users.values());
-  res.json(list);
-});
+router.get('/', asyncHandler(async (req, res) => {
+  const raw = Array.from(users.values());
+  const unique = uniqUsers(raw);
+
+  const viewerIds = await getViewerIdsFromReq(req);
+
+  const search = (req.query?.search || '').toString().trim();
+  const online = req.query?.online;
+
+  // Resolve "me" from Authorization (best-effort) so we can exclude it from search results.
+  let meEmail = null;
+  let meId = null;
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (token) {
+      const payload = jwt.verify(token, env.jwtSecret);
+      meEmail = payload?.email ? String(payload.email) : null;
+      meId = payload?.id ? String(payload.id) : null;
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  // If searching, never return everyone
+  if (search) {
+    if (search.length < 2) return res.json([]);
+    const termLower = search.toLowerCase();
+    const filtered = unique
+      .filter((u) => matchesSearch(u, termLower))
+      .filter((u) => {
+        if (!u) return false;
+        if (meEmail && u.email && String(u.email).toLowerCase() === String(meEmail).toLowerCase()) return false;
+        if (meId && u.id && String(u.id) === String(meId)) return false;
+        return true;
+      });
+    return res.json(filtered.slice(0, 25).map((u) => filterUserForViewer({ viewerIds, user: u })));
+  }
+
+  // Optional: filter online users
+  if (online === true || online === 'true' || online === 1 || online === '1') {
+    return res.json(unique.filter((u) => u && u.isOnline).map((u) => filterUserForViewer({ viewerIds, user: u })));
+  }
+
+  res.json(unique.map((u) => filterUserForViewer({ viewerIds, user: u })));
+}));
 
 // Get user by id (uses in-memory map seeded from DB)
-router.get('/:id', (req, res) => {
+router.get('/:id', asyncHandler(async (req, res) => {
+  const viewerIds = await getViewerIdsFromReq(req);
+
   let user = users.get(req.params.id) || null;
-  if (!user) {
-    user = { id: req.params.id, displayName: 'Guest', userType: 'guest' };
-    users.set(req.params.id, user);
+  if (user) return res.json(filterUserForViewer({ viewerIds, user }));
+
+  // DB fallback (important for blockedUsers/friends persistence)
+  try {
+    const id = String(req.params.id);
+    const doc = await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).lean().exec().catch(() => null);
+    if (doc) {
+      const derivedUsername = doc.username || doc.displayName || doc.name || (doc.email ? String(doc.email).split('@')[0] : undefined);
+      const entry = { ...doc, id: String(doc._id), username: derivedUsername };
+      if (doc.email) users.set(doc.email, entry);
+      if (doc.guestId) users.set(doc.guestId, entry);
+      users.set(String(doc._id), entry);
+
+      // Best-effort: persist username if missing so it survives future refreshes.
+      try {
+        if (!doc.username && derivedUsername) {
+          await User.updateOne({ _id: doc._id }, { $set: { username: String(derivedUsername) } }).exec();
+        }
+      } catch (e) {
+        // ignore
+      }
+      return res.json(filterUserForViewer({ viewerIds, user: entry }));
+    }
+  } catch (e) {
+    // ignore
   }
-  res.json(user);
-});
+
+  // Final fallback
+  const fallback = { id: req.params.id, displayName: 'Guest', userType: 'guest' };
+  users.set(req.params.id, fallback);
+  return res.json(filterUserForViewer({ viewerIds, user: fallback }));
+}));
+
+const getAuthedUserDoc = async (payload, userIdParam) => {
+  // Prefer registered accounts by email; otherwise resolve by id/guestId.
+  try {
+    if (payload?.email) {
+      const doc = await User.findOne({ email: String(payload.email) }).lean().exec().catch(() => null);
+      if (doc) return doc;
+    }
+  } catch (e) {}
+
+  const id = String(userIdParam || payload?.id || '').trim();
+  if (!id) return null;
+  try {
+    return await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).lean().exec().catch(() => null);
+  } catch (e) {
+    return null;
+  }
+};
+
+const canonicalBlockedId = async (rawId) => {
+  const id = String(rawId || '').trim();
+  if (!id) return null;
+  try {
+    const doc = await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).select('_id guestId userType').lean().exec().catch(() => null);
+    if (!doc) return id;
+    if (doc.userType === 'guest' && doc.guestId) return String(doc.guestId);
+    if (doc._id) return String(doc._id);
+    return id;
+  } catch (e) {
+    return id;
+  }
+};
+
+const expandUserIdEquivalents = async (rawId) => {
+  const id = String(rawId || '').trim();
+  const set = new Set();
+  if (!id) return set;
+  set.add(id);
+  try {
+    const doc = await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).select('_id guestId').lean().exec().catch(() => null);
+    if (doc?._id) set.add(String(doc._id));
+    if (doc?.guestId) set.add(String(doc.guestId));
+  } catch (e) {}
+  return set;
+};
+
+const syncUserStoreEntry = (doc) => {
+  try {
+    if (!doc) return;
+    const entry = { ...doc, id: String(doc._id) };
+    if (doc.email) users.set(doc.email, entry);
+    if (doc.guestId) users.set(doc.guestId, entry);
+    users.set(String(doc._id), entry);
+  } catch (e) {}
+};
+
+const authMatchesUserId = async (payload, userIdParam) => {
+  if (!payload) return false;
+  const param = String(userIdParam || '');
+  if (!param) return false;
+
+  // direct match
+  if (payload.id && String(payload.id) === param) return true;
+  if (payload.userId && String(payload.userId) === param) return true;
+  if (payload._id && String(payload._id) === param) return true;
+  if (payload.guestId && String(payload.guestId) === param) return true;
+
+  // email -> resolve user
+  try {
+    if (payload.email) {
+      const u = await User.findOne({ email: String(payload.email) }).select('_id guestId').lean().catch(() => null);
+      if (u?._id && String(u._id) === param) return true;
+      if (u?.guestId && String(u.guestId) === param) return true;
+    }
+  } catch (e) {}
+
+  // payload.id might be an object id -> resolve user
+  try {
+    if (payload.id && looksLikeObjectId(payload.id)) {
+      const u = await User.findById(String(payload.id)).select('_id guestId').lean().catch(() => null);
+      if (u?._id && String(u._id) === param) return true;
+      if (u?.guestId && String(u.guestId) === param) return true;
+    }
+  } catch (e) {}
+
+  return false;
+};
 
 // Record a profile view: body may include `viewerId` (who viewed)
 router.post('/:id/view', asyncHandler(async (req, res) => {
@@ -103,17 +355,78 @@ router.post('/:id/activity/message', asyncHandler(async (req, res) => {
 
 // Update user and persist to MongoDB
 router.patch('/:id', asyncHandler(async (req, res) => {
-  const existing = users.get(req.params.id) || { id: req.params.id };
-  const updated = { ...existing, ...req.body };
+  const userIdParam = String(req.params.id);
+  let existing = users.get(userIdParam) || { id: userIdParam };
+
+  // Best-effort DB read so lock survives stale in-memory entries.
+  try {
+    const doc = await User.findOne({ $or: [{ _id: userIdParam }, { guestId: userIdParam }, { email: userIdParam }] }).lean().exec().catch(() => null);
+    if (doc) existing = { ...existing, ...doc, id: String(doc.guestId || doc._id) };
+  } catch (e) {
+    // ignore
+  }
+
+  const incomingNameRaw = req.body?.name;
+  const incomingName = typeof incomingNameRaw === 'string' ? incomingNameRaw.trim() : null;
+  const currentName = existing?.name ? String(existing.name).trim() : '';
+  const wantsNameChange = typeof incomingName === 'string' && incomingName.length > 0 && incomingName !== currentName;
+
+  // Username/name is set only during /auth/signup or /auth/guest.
+  // Disallow any attempt to change it via Settings/Profile updates.
+  if (wantsNameChange) {
+    return res.status(403).json({ message: 'Username cannot be changed from Settings.' });
+  }
+
+  // Do not trust client-provided lastUsernameChange.
+  const safeBody = { ...(req.body || {}) };
+  delete safeBody.lastUsernameChange;
+
+  // DOB rules: allow setting only once; age must be 15–99.
+  if (Object.prototype.hasOwnProperty.call(safeBody, 'dob')) {
+    const incomingDobRaw = safeBody.dob;
+    const incomingDobStr = typeof incomingDobRaw === 'string' ? incomingDobRaw.trim() : incomingDobRaw;
+
+    const existingDob = existing?.dob ? new Date(existing.dob) : null;
+    const hasExistingDob = !!(existingDob && !Number.isNaN(existingDob.getTime()));
+
+    // If client tries to change DOB after it is set -> forbidden
+    if (incomingDobStr && hasExistingDob) {
+      const nextDob = new Date(incomingDobStr);
+      if (!Number.isNaN(nextDob.getTime()) && nextDob.toISOString().slice(0, 10) !== existingDob.toISOString().slice(0, 10)) {
+        return res.status(403).json({ message: 'DOB is locked and cannot be changed.' });
+      }
+    }
+
+    // If setting DOB for the first time, validate age range
+    if (incomingDobStr && !hasExistingDob) {
+      const nextDob = new Date(incomingDobStr);
+      if (Number.isNaN(nextDob.getTime())) {
+        return res.status(400).json({ message: 'Invalid dob' });
+      }
+
+      const today = new Date();
+      let age = today.getFullYear() - nextDob.getFullYear();
+      const monthDiff = today.getMonth() - nextDob.getMonth();
+      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < nextDob.getDate())) {
+        age -= 1;
+      }
+
+      if (age < 15 || age > 99) {
+        return res.status(400).json({ message: 'DOB must correspond to an age between 15 and 99.' });
+      }
+    }
+  }
+
+  const updated = { ...existing, ...safeBody };
+  // Never mutate username lock fields from this endpoint.
   // update in-memory store
-  users.set(req.params.id, updated);
+  users.set(userIdParam, updated);
   // attempt to persist to DB (non-fatal)
   try {
     const saved = await persistUserToDb(updated);
     if (saved) {
       // saved is a lean Mongo doc - update in-memory store with canonical data
-      const entry = { ...saved, id: String(saved.guestId || saved._id) };
-      users.set(req.params.id, entry);
+      syncUserStoreEntry(saved);
       return res.json(saved);
     }
   } catch (e) {
@@ -125,16 +438,96 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   res.json(updated);
 }));
 
-router.post('/:id/block', (req, res) => {
-  res.json({ message: 'blocked', target: req.body.blockedUserId });
-});
+router.post('/:id/block', asyncHandler(async (req, res) => {
+  const userId = req.params.id;
+  const blockedUserId = req.body?.blockedUserId ? String(req.body.blockedUserId) : null;
+  if (!blockedUserId) return res.status(400).json({ message: 'blockedUserId required' });
 
-router.post('/:id/unblock', (req, res) => {
-  res.json({ message: 'unblocked', target: req.body.unblockedUserId });
-});
+  const payload = getAuthPayload(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+  const ok = await authMatchesUserId(payload, userId);
+  if (!ok) return res.status(403).json({ message: 'Forbidden' });
 
-router.post('/:id/friends/remove', (req, res) => {
-  res.json({ message: 'friend removed', target: req.body.friendId });
-});
+  const me = await getAuthedUserDoc(payload, userId);
+  if (!me) return res.status(404).json({ message: 'User not found' });
+
+  const canonTarget = await canonicalBlockedId(blockedUserId);
+  if (!canonTarget) return res.status(400).json({ message: 'blockedUserId required' });
+
+  const existing = Array.isArray(me.blockedUsers) ? me.blockedUsers.map(String).filter(Boolean) : [];
+  const next = existing.includes(canonTarget) ? existing : [...existing, canonTarget];
+
+  try {
+    const updated = await User.findByIdAndUpdate(me._id, { $set: { blockedUsers: next } }, { new: true }).lean().exec();
+    syncUserStoreEntry(updated);
+    return res.json({ message: 'blocked', target: canonTarget, blockedUsers: Array.isArray(updated?.blockedUsers) ? updated.blockedUsers : next });
+  } catch (e) {
+    return res.status(500).json({ message: 'Failed to persist block', error: e?.message || e });
+  }
+}));
+
+router.post('/:id/unblock', asyncHandler(async (req, res) => {
+  const userId = req.params.id;
+  const unblockedUserId = req.body?.unblockedUserId ? String(req.body.unblockedUserId) : null;
+  if (!unblockedUserId) return res.status(400).json({ message: 'unblockedUserId required' });
+
+  const payload = getAuthPayload(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+  const ok = await authMatchesUserId(payload, userId);
+  if (!ok) return res.status(403).json({ message: 'Forbidden' });
+
+  const me = await getAuthedUserDoc(payload, userId);
+  if (!me) return res.status(404).json({ message: 'User not found' });
+
+  const canonTarget = await canonicalBlockedId(unblockedUserId);
+  const removeSet = await expandUserIdEquivalents(unblockedUserId);
+  if (canonTarget) removeSet.add(String(canonTarget));
+
+  const existing = Array.isArray(me.blockedUsers) ? me.blockedUsers.map(String).filter(Boolean) : [];
+  const next = existing.filter((id) => !removeSet.has(String(id)));
+
+  try {
+    const updated = await User.findByIdAndUpdate(me._id, { $set: { blockedUsers: next } }, { new: true }).lean().exec();
+    syncUserStoreEntry(updated);
+    return res.json({ message: 'unblocked', target: canonTarget || unblockedUserId, blockedUsers: Array.isArray(updated?.blockedUsers) ? updated.blockedUsers : next });
+  } catch (e) {
+    return res.status(500).json({ message: 'Failed to persist unblock', error: e?.message || e });
+  }
+}));
+
+router.post('/:id/friends/remove', asyncHandler(async (req, res) => {
+  const userId = req.params.id;
+  const friendId = req.body?.friendId ? String(req.body.friendId) : null;
+  if (!friendId) return res.status(400).json({ message: 'friendId required' });
+
+  const payload = getAuthPayload(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+  const ok = await authMatchesUserId(payload, userId);
+  if (!ok) return res.status(403).json({ message: 'Forbidden' });
+
+  const me = await getAuthedUserDoc(payload, userId);
+  if (!me) return res.status(404).json({ message: 'User not found' });
+
+  const meId = String(me._id);
+  const existing = Array.isArray(me.friends) ? me.friends.map(String).filter(Boolean) : [];
+  const next = existing.filter((id) => String(id) !== String(friendId));
+
+  try {
+    const updated = await User.findByIdAndUpdate(meId, { $set: { friends: next } }, { new: true }).lean().exec();
+    syncUserStoreEntry(updated);
+  } catch (e) {
+    return res.status(500).json({ message: 'Failed to remove friend', error: e?.message || e });
+  }
+
+  // Remove me from friend's list as well (best-effort)
+  try {
+    await User.updateOne(
+      { $or: [{ _id: String(friendId) }, { guestId: String(friendId) }] },
+      { $pull: { friends: String(meId) } }
+    ).exec();
+  } catch (e) {}
+
+  res.json({ message: 'friend removed', target: friendId, friends: next });
+}));
 
 export default router;

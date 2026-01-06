@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
-import { users, guestUsernames, persistUserToDb } from '../lib/userStore.js';
+import { users, guestUsernames, persistUserToDb, upsertUserInMemory } from '../lib/userStore.js';
 import User from '../models/User.js';
 import Session from '../models/Session.js';
 import { randomUUID } from 'crypto';
@@ -13,6 +13,58 @@ import { sendMail } from '../lib/mailer.js';
 const router = Router();
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DELETION_GRACE_PERIOD_MS = 10 * 24 * 60 * 60 * 1000;
+const EMAIL_VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
+
+const buildEmailVerifyUrl = ({ token }) => {
+  const base = String(env.clientOrigin || '').replace(/\/$/, '');
+  // Prefer verifying via backend directly so it works even if frontend has no route.
+  return `${base}/api/auth/verify-email?token=${encodeURIComponent(String(token))}`;
+};
+
+const issueEmailVerification = async ({ email, displayName }) => {
+  const cleanEmail = (email || '').toString().trim();
+  if (!cleanEmail) return null;
+
+  const token = `verify-${(typeof randomUUID === 'function') ? randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+  const expires = Date.now() + EMAIL_VERIFY_TTL_MS;
+
+  try {
+    await User.updateOne(
+      { email: cleanEmail },
+      { $set: { emailVerificationToken: token, emailVerificationTokenExpires: expires, emailVerified: false } }
+    ).exec();
+  } catch (e) {
+    console.warn('⚠️ Failed to persist email verification token', e?.message || e);
+  }
+
+  // Keep in-memory user in sync (best-effort)
+  try {
+    const cached = users.get(cleanEmail);
+    if (cached) {
+      cached.emailVerificationToken = token;
+      cached.emailVerificationTokenExpires = expires;
+      cached.emailVerified = false;
+      users.set(cleanEmail, cached);
+    }
+  } catch (_) {}
+
+  const verifyUrl = buildEmailVerifyUrl({ token });
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.5">
+      <p>Hi ${String(displayName || '').trim() || 'there'},</p>
+      <p>Thanks for signing up to ChitZ. Please verify your email address by clicking the button below:</p>
+      <p><a href="${verifyUrl}" style="display:inline-block;padding:10px 14px;background:#111827;color:#ffffff;text-decoration:none;border-radius:6px">Verify Email</a></p>
+      <p style="font-size:12px;color:#6b7280">This link expires in 24 hours. If you didn’t create an account, you can ignore this email.</p>
+      <p style="font-size:12px;color:#6b7280">If the button doesn’t work, copy/paste this link:<br/>${verifyUrl}</p>
+    </div>
+  `;
+
+  sendMail({ to: cleanEmail, subject: 'Verify your ChitZ email', html }).catch((e) => {
+    console.warn('⚠️ verify-email send failed', e?.message || e);
+  });
+
+  return { token, expires };
+};
 
 const getUserStorageKey = (user) => {
   if (!user) return null;
@@ -42,6 +94,37 @@ const enforceDeletionWindow = (user) => {
   }
 
   return { user, expired: false };
+};
+
+const finalizeDeletionIfDue = async (user) => {
+  if (!user) return { deleted: false };
+  const scheduledFor = Number(user.deleteScheduledFor || 0);
+  const pending = Boolean(user.deletePending && scheduledFor);
+  if (!pending) return { deleted: false };
+  if (Date.now() < scheduledFor) return { deleted: false };
+
+  // Remove from Mongo (registered email is the primary key)
+  try {
+    if (user.email) {
+      await User.deleteOne({ email: String(user.email) }).exec();
+    } else if (user._id) {
+      await User.deleteOne({ _id: String(user._id) }).exec();
+    } else if (user.id && /^[a-f\d]{24}$/i.test(String(user.id))) {
+      await User.deleteOne({ _id: String(user.id) }).exec();
+    }
+  } catch (e) {
+    console.warn('⚠️ Failed to finalize account deletion in DB', e?.message || e);
+  }
+
+  // Remove from in-memory cache
+  try {
+    const key = getUserStorageKey(user);
+    if (key) users.delete(key);
+    if (user.id) users.delete(String(user.id));
+    if (user.guestId) users.delete(String(user.guestId));
+  } catch (_) {}
+
+  return { deleted: true };
 };
 
 const extractAuthPayload = (req) => {
@@ -206,6 +289,9 @@ router.post('/signup', asyncHandler(async (req, res) => {
       users.set(convertingGuest.id, convertingGuest);
       const token = signToken(convertingGuest);
       const sessionId = await createSessionForUser(convertingGuest.id, req);
+
+      // Fire-and-forget verification email
+      try { await issueEmailVerification({ email, displayName: convertingGuest.displayName || convertingGuest.name || email }); } catch (_) {}
       return res.json({ user: sanitizeUser(convertingGuest), token, sessionId });
     } catch (e) {
       console.warn('⚠️ Failed to persist converted guest to registered user', e?.message || e);
@@ -234,6 +320,9 @@ router.post('/signup', asyncHandler(async (req, res) => {
   users.set(email, user);
   const token = signToken(user);
   const sessionId = await createSessionForUser(user.id, req);
+
+  // Fire-and-forget verification email
+  try { await issueEmailVerification({ email, displayName: user.displayName || user.name || email }); } catch (_) {}
   res.json({ user: sanitizeUser(user), token, sessionId });
 }));
 
@@ -248,18 +337,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
     return res.status(400).json({ message: 'Please provide a valid email address' });
   }
 
-      // Fire-and-forget: send verification email if we have an address
-      try {
-        if (convertingGuest.email) {
-          const vToken = jwt.sign({ email: convertingGuest.email, purpose: 'verify_email' }, env.jwtSecret, { expiresIn: '1d' });
-          const verifyUrl = `${env.clientOrigin.replace(/\/$/, '')}/auth/verify-email?token=${encodeURIComponent(vToken)}`;
-          const html = `<p>Hi ${convertingGuest.displayName || ''},</p><p>Thanks for signing up. Please verify your email by clicking the link below:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p><p>If you didn't sign up, ignore this message.</p>`;
-          sendMail({ to: convertingGuest.email, subject: 'Verify your ChitZ account', html }).catch((e) => console.warn('⚠️ verify-email send failed', e?.message || e));
-        }
-      } catch (e) {
-        console.warn('⚠️ Failed to queue verification email', e?.message || e);
-      }
-      res.json({ user: sanitizeUser(convertingGuest), token, sessionId });
+  const normalized = email.trim().toLowerCase();
   const user = Array.from(users.values()).find((u) => (u.email || '').toLowerCase() === normalized);
 
   if (user) {
@@ -287,6 +365,12 @@ router.post('/login', asyncHandler(async (req, res) => {
   const { user, expired } = enforceDeletionWindow(lookup);
   if (!user) {
     return res.status(expired ? 410 : 401).json({ message: expired ? 'Account already deleted' : 'invalid credentials' });
+  }
+
+  // Finalize deletion if grace period elapsed.
+  if (user.deletePending && user.deleteScheduledFor && Date.now() >= Number(user.deleteScheduledFor)) {
+    await finalizeDeletionIfDue(user);
+    return res.status(410).json({ message: 'Account already deleted' });
   }
 
   const ok = await bcrypt.compare(password, user.password);
@@ -365,6 +449,7 @@ router.post('/guest', asyncHandler(async (req, res) => {
     const user = {
       id: saved.guestId || String(saved._id),
       email: '',
+      username: saved.username || saved.displayName,
       displayName: saved.displayName,
       userType: 'guest',
       createdAt: saved.createdAt
@@ -386,7 +471,7 @@ router.post('/guest', asyncHandler(async (req, res) => {
     console.warn('⚠️ Failed to persist guest user', e?.message || e);
     // Fall back to in-memory guest (non-persistent)
     const fallbackId = `guest-${Date.now()}`;
-    const user = { id: fallbackId, email: '', displayName: username, userType: 'guest' };
+    const user = { id: fallbackId, email: '', username, displayName: username, userType: 'guest' };
     guestUsernames.set(username.toLowerCase(), user.id);
     users.set(user.id, user);
     const token = signToken(user);
@@ -425,49 +510,137 @@ router.get('/me', (req, res) => {
   }
 
   const { payload } = auth;
-  const { user, expired } = resolveUserFromPayload(payload);
+  let { user, expired } = resolveUserFromPayload(payload);
   if (!user && expired) {
     return res.status(410).json({ message: 'Account already deleted' });
   }
 
-  const displayName = user?.displayName || payload.email || 'User';
-  // Include profile fields so frontend can show them on refresh
-  res.json({
-    id: user?.id || payload.id,
-    uid: user?.id || payload.id,
-    email: payload.email,
-    userType: payload.userType,
-    name: displayName,
-    displayName,
-    emailVerified: user?.emailVerified ?? false,
-    avatar: user?.avatar || user?.photoURL || null,
-    bio: user?.bio || '',
-    settings: user?.settings || {},
-    createdAt: user?.createdAt || payload.iat ? new Date() : undefined
-  });
+  // Refresh from DB so profile fields persist across restarts / stale in-memory cache.
+  (async () => {
+    try {
+      let doc = null;
+      if (payload?.email) {
+        doc = await User.findOne({ email: String(payload.email) }).lean().exec().catch(() => null);
+      }
+      if (!doc && payload?.id) {
+        const id = String(payload.id);
+        doc = await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).lean().exec().catch(() => null);
+      }
+      if (doc) {
+        user = upsertUserInMemory({ ...doc, id: String(doc.guestId || doc._id) });
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    // Finalize deletion if grace period elapsed (DB-backed)
+    try {
+      if (user?.deletePending && user?.deleteScheduledFor && Date.now() >= Number(user.deleteScheduledFor)) {
+        await finalizeDeletionIfDue(user);
+        return res.status(410).json({ message: 'Account already deleted' });
+      }
+    } catch (_) {}
+
+    const displayName = user?.displayName || user?.name || payload.email || 'User';
+    const createdAt = user?.createdAt || (payload?.iat ? new Date(Number(payload.iat) * 1000) : undefined);
+    const avatarUrl = (user?.avatar || user?.photoURL || '').toString().trim();
+
+    return res.json({
+      id: user?.id || payload.id,
+      uid: user?.id || payload.id,
+      email: user?.email || payload.email,
+      userType: user?.userType || payload.userType,
+      premiumStatus: user?.premiumStatus,
+      name: user?.name || displayName,
+      displayName,
+      username: user?.username,
+      lastUsernameChange: user?.lastUsernameChange,
+      emailVerified: user?.emailVerified ?? false,
+      avatar: avatarUrl || null,
+      photoURL: avatarUrl || null,
+      bio: user?.bio || '',
+      gender: user?.gender || '',
+      location: user?.location || '',
+      dob: user?.dob || null,
+      settings: user?.settings || {},
+      isOnline: user?.isOnline ?? false,
+      lastSeen: user?.lastSeen || null,
+      createdAt
+    });
+  })();
 });
 
 router.post('/logout', (_req, res) => {
   res.json({ message: 'logged out' });
 });
 
-router.post('/resend-verification', (req, res) => {
+router.post('/resend-verification', asyncHandler(async (req, res) => {
   const { email } = req.body || {};
-  if (!email) {
+  const cleanEmail = (email || '').toString().trim();
+  if (!cleanEmail) {
     return res.status(400).json({ message: 'Email is required' });
   }
-  const record = users.get(email);
-  if (!record) {
-    return res.status(404).json({ message: 'User not found' });
+  if (!emailRegex.test(cleanEmail)) {
+    return res.status(400).json({ message: 'Please provide a valid email address' });
   }
-  const { user, expired } = enforceDeletionWindow(record);
-  if (!user) {
-    return res.status(expired ? 410 : 404).json({ message: expired ? 'Account already deleted' : 'User not found' });
+
+  const record = users.get(cleanEmail);
+  const displayName = record?.displayName || record?.name || cleanEmail;
+
+  // Fire-and-forget, but don't leak whether the email exists.
+  try {
+    await issueEmailVerification({ email: cleanEmail, displayName });
+  } catch (e) {
+    // ignore
   }
-  user.lastVerificationSentAt = Date.now();
-  users.set(email, user);
-  res.json({ message: 'Verification email dispatched (stub)' });
-});
+
+  res.json({ message: 'If an account exists, a verification email has been sent.' });
+}));
+
+// Verify via email link (no auth required)
+router.get('/verify-email', asyncHandler(async (req, res) => {
+  const token = (req.query?.token || '').toString().trim();
+  if (!token) {
+    return res.status(400).send('Missing token');
+  }
+
+  const doc = await User.findOne({ emailVerificationToken: token }).exec().catch(() => null);
+  if (!doc) {
+    return res.status(400).send('Invalid or already used token');
+  }
+
+  const expires = Number(doc.emailVerificationTokenExpires || 0);
+  if (expires && Date.now() > expires) {
+    return res.status(400).send('Verification link expired. Please request a new one.');
+  }
+
+  doc.emailVerified = true;
+  doc.emailVerificationToken = undefined;
+  doc.emailVerificationTokenExpires = undefined;
+  await doc.save();
+
+  // Sync in-memory
+  try {
+    const emailKey = doc.email ? String(doc.email) : null;
+    if (emailKey && users.has(emailKey)) {
+      const u = users.get(emailKey);
+      u.emailVerified = true;
+      delete u.emailVerificationToken;
+      delete u.emailVerificationTokenExpires;
+      users.set(emailKey, u);
+    }
+  } catch (_) {}
+
+  const redirectBase = String(env.clientOrigin || '').replace(/\/$/, '');
+  const homeUrl = redirectBase || '/';
+  res.status(200).send(`
+    <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;padding:24px">
+      <h2>Email verified ✅</h2>
+      <p>Your email address is now verified.</p>
+      <p><a href="${homeUrl}">Go back to ChitZ</a></p>
+    </div>
+  `);
+}));
 
 router.post('/verify-email', asyncHandler(async (req, res) => {
   const auth = requireRegisteredUser(req);
@@ -500,83 +673,145 @@ router.post('/change-password', asyncHandler(async (req, res) => {
   }
 
   const { user } = auth;
-  if (!user || !user.password) {
+  const email = user?.email ? String(user.email).trim() : null;
+  if (!email) {
     return res.status(400).json({ message: 'Unable to change password for this account' });
   }
 
-  const matches = await bcrypt.compare(currentPassword, user.password);
+  // Authoritative source of truth is MongoDB.
+  const userDoc = await User.findOne({ email }).exec().catch(() => null);
+  if (!userDoc) {
+    return res.status(404).json({ message: 'User not found' });
+  }
+  if (!userDoc.password) {
+    return res.status(400).json({ message: 'Unable to change password for this account' });
+  }
+
+  const matches = await bcrypt.compare(currentPassword, String(userDoc.password));
   if (!matches) {
     return res.status(401).json({ message: 'Current password is incorrect' });
   }
 
-  user.password = await bcrypt.hash(newPassword, 10);
-  users.set(user.email, user);
+  const nextHash = await bcrypt.hash(newPassword, 10);
+  userDoc.password = nextHash;
+  userDoc.resetToken = undefined;
+  userDoc.resetTokenExpires = undefined;
+  await userDoc.save();
+
+  // Keep in-memory cache in sync for current session.
+  try {
+    user.password = nextHash;
+    users.set(email, user);
+    await persistUserToDb(user);
+  } catch (e) {
+    // best-effort
+  }
+
   res.json({ message: 'Password updated successfully' });
 }));
 
 router.get('/deletion-status', (req, res) => {
-  const auth = requireRegisteredUser(req);
+  const auth = extractAuthPayload(req);
   if (auth.error) {
-    const status = auth.error.status || 400;
-    const message = auth.error.status === 404 ? 'Only registered accounts can schedule deletion' : auth.error.message;
-    return res.status(status).json({ message });
+    return res.status(auth.error.status).json({ message: auth.error.message });
   }
 
-  const { user } = auth;
-  const pending = Boolean(user.deletePending && user.deleteScheduledFor && user.deleteScheduledFor > Date.now());
-  res.json({
-    pending,
-    scheduledFor: pending ? user.deleteScheduledFor : null,
-    daysRemaining: pending ? Math.max(0, Math.ceil((user.deleteScheduledFor - Date.now()) / (24 * 60 * 60 * 1000))) : 0
-  });
+  const email = auth.payload?.email ? String(auth.payload.email).trim() : null;
+  if (!email) {
+    return res.status(400).json({ message: 'Only registered accounts can schedule deletion' });
+  }
+
+  (async () => {
+    const doc = await User.findOne({ email }).select('deletePending deleteScheduledFor').lean().exec().catch(() => null);
+    if (!doc) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const scheduledFor = Number(doc.deleteScheduledFor || 0);
+    const pending = Boolean(doc.deletePending && scheduledFor && scheduledFor > Date.now());
+    return res.json({
+      pending,
+      scheduledFor: pending ? scheduledFor : null,
+      daysRemaining: pending ? Math.max(0, Math.ceil((scheduledFor - Date.now()) / (24 * 60 * 60 * 1000))) : 0
+    });
+  })();
 });
 
-router.post('/delete-account', (req, res) => {
-  const auth = requireRegisteredUser(req);
+router.post('/delete-account', asyncHandler(async (req, res) => {
+  const auth = extractAuthPayload(req);
   if (auth.error) {
-    const status = auth.error.status || 400;
-    const message = auth.error.status === 404 ? 'Only registered accounts can schedule deletion' : auth.error.message;
-    return res.status(status).json({ message });
+    return res.status(auth.error.status).json({ message: auth.error.message });
   }
 
-  const { user } = auth;
+  const email = auth.payload?.email ? String(auth.payload.email).trim() : null;
+  if (!email) {
+    return res.status(400).json({ message: 'Only registered accounts can schedule deletion' });
+  }
+
   const now = Date.now();
-  user.deletePending = true;
-  user.deleteRequestedAt = now;
-  user.deleteScheduledFor = now + DELETION_GRACE_PERIOD_MS;
-  const key = getUserStorageKey(user);
-  if (key) {
-    users.set(key, user);
+  const scheduledFor = now + DELETION_GRACE_PERIOD_MS;
+
+  const doc = await User.findOne({ email }).exec().catch(() => null);
+  if (!doc) {
+    return res.status(404).json({ message: 'User not found' });
   }
 
-  res.json({
-    message: 'Account scheduled for deletion in 10 days',
-    scheduledFor: user.deleteScheduledFor
-  });
-});
+  doc.deletePending = true;
+  doc.deleteRequestedAt = now;
+  doc.deleteScheduledFor = scheduledFor;
+  await doc.save();
 
-router.post('/cancel-deletion', (req, res) => {
-  const auth = requireRegisteredUser(req);
+  // Sync in-memory best-effort
+  try {
+    const cached = users.get(email);
+    if (cached) {
+      cached.deletePending = true;
+      cached.deleteRequestedAt = now;
+      cached.deleteScheduledFor = scheduledFor;
+      users.set(email, cached);
+    }
+  } catch (_) {}
+
+  res.json({ message: 'Account scheduled for deletion in 10 days', scheduledFor });
+}));
+
+router.post('/cancel-deletion', asyncHandler(async (req, res) => {
+  const auth = extractAuthPayload(req);
   if (auth.error) {
-    const status = auth.error.status || 400;
-    const message = auth.error.status === 404 ? 'Only registered accounts can cancel deletion' : auth.error.message;
-    return res.status(status).json({ message });
+    return res.status(auth.error.status).json({ message: auth.error.message });
   }
 
-  const { user } = auth;
-  if (!user.deletePending) {
+  const email = auth.payload?.email ? String(auth.payload.email).trim() : null;
+  if (!email) {
+    return res.status(400).json({ message: 'Only registered accounts can cancel deletion' });
+  }
+
+  const doc = await User.findOne({ email }).exec().catch(() => null);
+  if (!doc) {
+    return res.status(404).json({ message: 'User not found' });
+  }
+
+  if (!doc.deletePending) {
     return res.status(400).json({ message: 'No deletion scheduled' });
   }
 
-  delete user.deletePending;
-  delete user.deleteRequestedAt;
-  delete user.deleteScheduledFor;
-  const key = getUserStorageKey(user);
-  if (key) {
-    users.set(key, user);
-  }
+  doc.deletePending = false;
+  doc.deleteRequestedAt = undefined;
+  doc.deleteScheduledFor = undefined;
+  await doc.save();
+
+  // Sync in-memory best-effort
+  try {
+    const cached = users.get(email);
+    if (cached) {
+      delete cached.deletePending;
+      delete cached.deleteRequestedAt;
+      delete cached.deleteScheduledFor;
+      users.set(email, cached);
+    }
+  } catch (_) {}
 
   res.json({ message: 'Deletion request canceled' });
-});
+}));
 
 export default router;

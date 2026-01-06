@@ -6,6 +6,7 @@ const MessageSchema = new mongoose.Schema({
   senderName: { type: String },
   content: { type: String, required: true },
   type: { type: String, default: 'text' },
+  replyTo: { type: String },
   createdAt: { type: Date, default: Date.now },
   editedAt: { type: Date },
   reactions: [{ emoji: String, userId: String, createdAt: Date }],
@@ -21,10 +22,13 @@ const getModelForRoom = (room) => {
   // room may be null/undefined -> default to RoomMessage
   try {
     if (!room) return RoomMessage;
-    if (room.type === 'dm') {
-      if (room.category === 'random') return RandomMessage;
-      return DMMessage;
-    }
+    // Random chat is stored separately
+    if (room.category === 'random') return RandomMessage;
+
+    // DMs: older data sometimes uses type 'private' with category 'dm'
+    const isDM = room.type === 'dm' || room.category === 'dm' || room.isDM === true || room.isDirect === true;
+    if (isDM) return DMMessage;
+
     return RoomMessage;
   } catch (e) {
     return RoomMessage;

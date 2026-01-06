@@ -4,6 +4,8 @@ const UserSchema = new mongoose.Schema({
   email: { type: String, index: true, unique: true, sparse: true },
   guestId: { type: String, index: true, unique: true, sparse: true },
   password: String,
+  username: { type: String, index: true },
+  lastUsernameChange: { type: Date },
   displayName: String,
   name: String,
   userType: { type: String, default: 'registered' },
@@ -15,6 +17,7 @@ const UserSchema = new mongoose.Schema({
   dob: { type: Date },
   location: { type: String },
   avatar: { type: String },
+  photoURL: { type: String },
   // Preferences / settings
   settings: {
     notifications: {
@@ -23,13 +26,16 @@ const UserSchema = new mongoose.Schema({
       groupInvites: { type: Boolean, default: true },
       systemUpdates: { type: Boolean, default: false },
       soundEnabled: { type: Boolean, default: true },
-      vibrationEnabled: { type: Boolean, default: true }
+      vibrationEnabled: { type: Boolean, default: true },
+      alertVolume: { type: Number, default: 80 }
     },
     privacy: {
       profileVisibility: { type: String, enum: ['public', 'friends', 'private'], default: 'public' },
       showOnlineStatus: { type: Boolean, default: true },
       allowDirectMessages: { type: Boolean, default: true },
-      showReadReceipts: { type: Boolean, default: true }
+      showReadReceipts: { type: Boolean, default: true },
+      dmScope: { type: String, enum: ['everyone', 'friends'], default: 'everyone' },
+      profilePhotoVisibility: { type: String, enum: ['everyone', 'friends'], default: 'everyone' }
     },
     appearance: {
       fontSize: { type: String, enum: ['small', 'medium', 'large'], default: 'medium' },
@@ -41,10 +47,17 @@ const UserSchema = new mongoose.Schema({
   },
   // Session info for user sessions (debugging/management)
   sessions: [{ token: String, createdAt: Date, lastActive: Date }],
+  friends: [{ type: String }],
+  blockedUsers: [{ type: String }],
   lastIp: String,
   lastActive: Date,
+  // Presence
+  isOnline: { type: Boolean, default: false },
+  lastSeen: { type: Date },
   resetToken: String,
   resetTokenExpires: Number,
+  emailVerificationToken: String,
+  emailVerificationTokenExpires: Number,
   deletePending: Boolean,
   deleteRequestedAt: Number,
   deleteScheduledFor: Number,

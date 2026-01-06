@@ -4,18 +4,41 @@ import User from '../models/User.js';
 export const users = new Map(); // keyed by email (for registered accounts)
 export const guestUsernames = new Map();
 
+export function upsertUserInMemory(docOrUser) {
+  if (!docOrUser) return null;
+  const id = String(docOrUser._id || docOrUser.id || '').trim();
+  const guestId = docOrUser.guestId ? String(docOrUser.guestId) : null;
+  const email = docOrUser.email ? String(docOrUser.email) : null;
+
+  const entry = {
+    ...docOrUser,
+    id: id || (guestId || email || undefined)
+  };
+
+  try {
+    if (email) users.set(email, entry);
+    if (guestId) users.set(guestId, entry);
+    if (id) users.set(id, entry);
+    if (entry.id) users.set(String(entry.id), entry);
+  } catch (e) {
+    // ignore
+  }
+
+  try {
+    if (guestId && entry.displayName) {
+      guestUsernames.set(String(entry.displayName).toLowerCase(), guestId);
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  return entry;
+}
+
 export async function seedUsersFromDb() {
   const docs = await User.find({}).lean().exec();
   docs.forEach((doc) => {
-    const entry = { ...doc, id: String(doc._id) };
-    if (doc.email) users.set(doc.email, entry);
-    if (doc.guestId) users.set(doc.guestId, entry);
-    // also index by Mongo _id string for identifier lookups
-    users.set(String(doc._id), entry);
-    // index guest username -> guestId for availability checks
-    if (doc.guestId && doc.displayName) {
-      guestUsernames.set(doc.displayName.toLowerCase(), doc.guestId);
-    }
+    upsertUserInMemory({ ...doc, id: String(doc._id) });
   });
 }
 
@@ -24,6 +47,19 @@ export async function persistUserToDb(user) {
   // Only persist registered accounts (those with email)
   const data = { ...user };
   delete data.id;
+
+  // Keep profile photo fields consistent across the codebase.
+  // Some UI writes `photoURL`, others write `avatar`.
+  if (!data.avatar && data.photoURL) data.avatar = data.photoURL;
+  if (!data.photoURL && data.avatar) data.photoURL = data.avatar;
+
+  // Make sure username is persisted; many UI places render @username.
+  // If missing, fall back to displayName (especially for guests).
+  if (!data.username) {
+    if (data.displayName) data.username = data.displayName;
+    else if (data.name) data.username = data.name;
+    else if (data.email) data.username = String(data.email).split('@')[0];
+  }
   try {
     if (user.email) {
       const saved = await User.findOneAndUpdate({ email: user.email }, data, { upsert: true, new: true }).lean().exec();
