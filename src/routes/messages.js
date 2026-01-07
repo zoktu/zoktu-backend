@@ -61,6 +61,21 @@ const getAuthPayload = (req) => {
 
 const looksLikeObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
 
+const normalizeReceiptIds = (auth) => {
+  try {
+    const raw = Array.isArray(auth?.ids) ? auth.ids.map(String).filter(Boolean) : [];
+    const uniq = Array.from(new Set(raw));
+    // Avoid emails in receipt arrays; prefer stable ids (mongo _id, guestId, etc.).
+    return uniq.filter((id) => {
+      if (!id) return false;
+      if (String(id).includes('@')) return false;
+      return true;
+    });
+  } catch (e) {
+    return [];
+  }
+};
+
 const isDmRoomDoc = (doc) => Boolean(
   doc && (
     doc.type === 'dm' ||
@@ -68,6 +83,34 @@ const isDmRoomDoc = (doc) => Boolean(
     (doc.type === 'private' && doc.category === 'dm')
   )
 );
+
+const canonicalFriendKeyForUserDoc = (doc, fallbackId) => {
+  if (doc && doc.userType === 'guest' && doc.guestId) return String(doc.guestId);
+  if (doc && doc._id) return String(doc._id);
+  return fallbackId ? String(fallbackId) : null;
+};
+
+const areUsersFriends = async (aId, bId) => {
+  if (!aId || !bId) return false;
+  try {
+    const aDoc = await User.findOne({ $or: [{ _id: String(aId) }, { guestId: String(aId) }] })
+      .select('_id guestId userType friends')
+      .lean()
+      .catch(() => null);
+    if (!aDoc) return false;
+    const aFriends = Array.isArray(aDoc.friends) ? aDoc.friends.map(String) : [];
+
+    const bDoc = await User.findOne({ $or: [{ _id: String(bId) }, { guestId: String(bId) }] })
+      .select('_id guestId userType')
+      .lean()
+      .catch(() => null);
+    const bKey = canonicalFriendKeyForUserDoc(bDoc, bId);
+    if (!bKey) return false;
+    return aFriends.includes(String(bKey));
+  } catch (e) {
+    return false;
+  }
+};
 
 const getExpandedBlockedSetForUserId = async (userId) => {
   if (!userId) return new Set();
@@ -312,6 +355,82 @@ router.post('/rooms/:roomId/messages/clear-for-me', asyncHandler(async (req, res
   res.json({ message: 'cleared', roomId });
 }));
 
+// DM receipts: receiver marks messages as delivered/read.
+router.post('/rooms/:roomId/messages/mark-delivered', asyncHandler(async (req, res) => {
+  const roomId = req.params.roomId;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+  if (!isDmRoomDoc(roomDoc)) return res.status(400).json({ message: 'Receipts supported only for DMs' });
+
+  const receiptIds = normalizeReceiptIds(auth);
+  if (!receiptIds.length) return res.json({ message: 'ok', updated: 0 });
+
+  const messageIdsRaw = Array.isArray(req.body?.messageIds) ? req.body.messageIds : [];
+  const messageIds = messageIdsRaw.map(String).filter(Boolean).slice(0, 200);
+
+  const selfIds = Array.from(new Set([String(auth.primary), ...(auth.ids || []).map(String)])).filter(Boolean);
+  const Model = getModelForRoom(roomDoc);
+
+  const query = {
+    roomId: String(roomId),
+    senderId: { $nin: selfIds },
+    ...(messageIds.length ? { _id: { $in: messageIds } } : {})
+  };
+
+  const result = await Model.updateMany(
+    query,
+    { $addToSet: { 'meta.deliveredTo': { $each: receiptIds } } }
+  ).exec();
+
+  res.json({ message: 'ok', updated: result?.modifiedCount ?? result?.nModified ?? 0 });
+}));
+
+router.post('/rooms/:roomId/messages/mark-read', asyncHandler(async (req, res) => {
+  const roomId = req.params.roomId;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+  if (!isDmRoomDoc(roomDoc)) return res.status(400).json({ message: 'Receipts supported only for DMs' });
+
+  // Respect user setting to not send read receipts.
+  try {
+    const me = await User.findOne({ $or: [{ _id: String(auth.primary) }, { guestId: String(auth.primary) }] })
+      .select('settings')
+      .lean()
+      .catch(() => null);
+    if (me?.settings?.showReadReceipts === false) {
+      return res.json({ message: 'disabled', updated: 0 });
+    }
+  } catch (e) {
+    // best-effort
+  }
+
+  const receiptIds = normalizeReceiptIds(auth);
+  if (!receiptIds.length) return res.json({ message: 'ok', updated: 0 });
+
+  const messageIdsRaw = Array.isArray(req.body?.messageIds) ? req.body.messageIds : [];
+  const messageIds = messageIdsRaw.map(String).filter(Boolean).slice(0, 200);
+
+  const selfIds = Array.from(new Set([String(auth.primary), ...(auth.ids || []).map(String)])).filter(Boolean);
+  const Model = getModelForRoom(roomDoc);
+
+  const query = {
+    roomId: String(roomId),
+    senderId: { $nin: selfIds },
+    ...(messageIds.length ? { _id: { $in: messageIds } } : {})
+  };
+
+  const result = await Model.updateMany(
+    query,
+    { $addToSet: { 'meta.readBy': { $each: receiptIds } } }
+  ).exec();
+
+  res.json({ message: 'ok', updated: result?.modifiedCount ?? result?.nModified ?? 0 });
+}));
+
 router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(async (req, res) => {
   const roomId = req.params.roomId;
   const { senderId, content, replyTo } = req.body || {};
@@ -399,6 +518,26 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
           senderIds.some((sid) => otherBlocked.has(String(sid)));
         if (either) {
           return res.status(403).json({ message: 'Cannot send DM: one of the users has blocked the other' });
+        }
+      }
+    }
+  } catch (e) {
+    // best-effort
+  }
+
+  // Media in DMs requires friendship (image/voice/audio)
+  try {
+    if (isDmRoomDoc(roomDoc)) {
+      const msgType = String((req.body && req.body.type) || 'text').toLowerCase();
+      const isMedia = msgType === 'image' || msgType === 'audio' || msgType === 'voice' || msgType === 'media';
+      if (isMedia) {
+        const participants = (roomDoc?.participants || roomDoc?.members || []).map(String).filter(Boolean);
+        const other = participants.find((p) => !auth.ids.includes(String(p))) || null;
+        if (other) {
+          const ok = await areUsersFriends(senderIdEffective, other);
+          if (!ok) {
+            return res.status(403).json({ message: 'Only friends can send images/voice notes in DMs' });
+          }
         }
       }
     }

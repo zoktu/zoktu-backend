@@ -7,6 +7,29 @@ import { upsertUserInMemory } from '../lib/userStore.js';
 
 const router = Router();
 
+const isRegisteredAndVerified = (userDoc) => {
+  if (!userDoc) return false;
+  const userType = String(userDoc.userType || '').toLowerCase();
+  const isRegistered = userType && userType !== 'guest';
+  const isVerified = Boolean(userDoc.emailVerified === true);
+  return isRegistered && isVerified;
+};
+
+const getUserDocForAuth = async (payload) => {
+  if (!payload) return null;
+  const ors = [];
+  if (payload.email) ors.push({ email: String(payload.email) });
+  if (payload.id) {
+    ors.push({ _id: String(payload.id) });
+    ors.push({ guestId: String(payload.id) });
+  }
+  if (!ors.length) return null;
+  return await User.findOne({ $or: ors })
+    .select('_id guestId userType emailVerified')
+    .lean()
+    .catch(() => null);
+};
+
 const uniqStrings = (arr) => Array.from(new Set((arr || []).filter(Boolean).map((v) => String(v))));
 
 const expandUserIdentifiers = async ({ id, email }) => {
@@ -91,6 +114,12 @@ router.get('/requests', requireAuth, asyncHandler(async (req, res) => {
 // Send a friend request (payload sender is taken from auth; accepts multiple body key names)
 router.post('/requests', requireAuth, asyncHandler(async (req, res) => {
   const payload = req.user;
+  // Only registered + verified users can send friend requests
+  const meDoc = await getUserDocForAuth(payload);
+  if (!isRegisteredAndVerified(meDoc)) {
+    return res.status(403).json({ message: 'Only registered and verified users can send friend requests' });
+  }
+
   const fromId = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
   if (!fromId) return res.status(401).json({ message: 'Unauthorized' });
 
@@ -124,6 +153,13 @@ router.post('/requests', requireAuth, asyncHandler(async (req, res) => {
 
 const acceptRequest = async (req, res) => {
   const payload = req.user;
+
+  // Only registered + verified users can accept friend requests
+  const meDoc = await getUserDocForAuth(payload);
+  if (!isRegisteredAndVerified(meDoc)) {
+    return res.status(403).json({ message: 'Only registered and verified users can accept friend requests' });
+  }
+
   const expanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
   const canonical = (await canonicalIdForAuthPayload(payload)) || expanded[0] || null;
   const allowIds = uniqStrings([canonical, ...(expanded || [])]);
