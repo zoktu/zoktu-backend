@@ -7,11 +7,11 @@ const buildMongoUri = () => {
   const user = process.env.MONGO_USER;
   const pass = process.env.MONGO_PASS;
   const host = process.env.MONGO_HOST;
-  const db = process.env.MONGO_DB || 'chitz';
+  const db = process.env.MONGO_DB || 'zoktu';
   if (user && pass && host) {
     return `mongodb+srv://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}/${db}?retryWrites=true&w=majority`;
   }
-  return 'mongodb://localhost:27017/chitz';
+  return 'mongodb://localhost:27017/zoktu';
 };
 
 export const env = {

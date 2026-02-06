@@ -13,7 +13,7 @@ cloudinary.v2.config({
 // GET /api/uploads/sign?folder=optional
 router.get('/sign', (req, res) => {
   try {
-    const folder = req.query.folder || process.env.CLOUDINARY_DEFAULT_FOLDER || 'chitz';
+    const folder = req.query.folder || process.env.CLOUDINARY_DEFAULT_FOLDER || 'zoktu';
     const timestamp = Math.floor(Date.now() / 1000);
     // Only sign selected params (folder and timestamp). Add transformations here if needed.
     const paramsToSign = { folder, timestamp };

@@ -52,14 +52,14 @@ const issueEmailVerification = async ({ email, displayName }) => {
   const html = `
     <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.5">
       <p>Hi ${String(displayName || '').trim() || 'there'},</p>
-      <p>Thanks for signing up to ChitZ. Please verify your email address by clicking the button below:</p>
+      <p>Thanks for signing up to Zoktu. Please verify your email address by clicking the button below:</p>
       <p><a href="${verifyUrl}" style="display:inline-block;padding:10px 14px;background:#111827;color:#ffffff;text-decoration:none;border-radius:6px">Verify Email</a></p>
       <p style="font-size:12px;color:#6b7280">This link expires in 24 hours. If you didn’t create an account, you can ignore this email.</p>
       <p style="font-size:12px;color:#6b7280">If the button doesn’t work, copy/paste this link:<br/>${verifyUrl}</p>
     </div>
   `;
 
-  sendMail({ to: cleanEmail, subject: 'Verify your ChitZ email', html }).catch((e) => {
+  sendMail({ to: cleanEmail, subject: 'Verify your Zoktu email', html }).catch((e) => {
     console.warn('⚠️ verify-email send failed', e?.message || e);
   });
 
@@ -354,7 +354,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
     try {
       const resetUrl = `${base}/auth/reset-password?token=${encodeURIComponent(user.resetToken)}`;
       const html = `<p>Hi ${user.displayName || ''},</p><p>We received a request to reset your password. Click the link below to reset it (valid for 20 minutes):</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>If you didn't request this, ignore this message.</p>`;
-      sendMail({ to: user.email, subject: 'Reset your ChitZ password', html }).catch((e) => console.warn('⚠️ reset-email send failed', e?.message || e));
+      sendMail({ to: user.email, subject: 'Reset your Zoktu password', html }).catch((e) => console.warn('⚠️ reset-email send failed', e?.message || e));
     } catch (e) {
       console.warn('⚠️ Failed to queue reset email', e?.message || e);
     }
@@ -648,7 +648,7 @@ router.get('/verify-email', asyncHandler(async (req, res) => {
     <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.6;padding:24px">
       <h2>Email verified ✅</h2>
       <p>Your email address is now verified.</p>
-      <p><a href="${homeUrl}">Go back to ChitZ</a></p>
+      <p><a href="${homeUrl}">Go back to Zoktu</a></p>
     </div>
   `);
 }));

@@ -22,7 +22,7 @@ async function seed() {
 
     const doc = new Room({
       _id: id,
-      name: 'Welcome to ChitZ',
+      name: 'Welcome to Zoktu',
       description: 'Official system room — announcements, help, and community updates.',
       type: 'public',
       owner: 'system',
