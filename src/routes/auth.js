@@ -340,13 +340,19 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
   const normalized = email.trim().toLowerCase();
   const user = Array.from(users.values()).find((u) => (u.email || '').toLowerCase() === normalized);
 
+  const base = String(env.clientOrigin || '').replace(/\/$/, '');
+  // In dev, always return a reset URL (even if user doesn't exist) to avoid account enumeration
+  // while still letting developers test the reset flow without SMTP.
+  const devToken = `reset-dev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const devResetUrl = `${base}/auth/reset-password?token=${encodeURIComponent(user?.resetToken || devToken)}`;
+
   if (user) {
     user.resetToken = `reset-${Date.now()}`;
     user.resetTokenExpires = Date.now() + 20 * 60 * 1000; // 20 minutes
     try { await persistUserToDb(user); } catch (_) {}
     // send reset email (non-blocking)
     try {
-      const resetUrl = `${env.clientOrigin.replace(/\/$/, '')}/auth/reset-password?token=${encodeURIComponent(user.resetToken)}`;
+      const resetUrl = `${base}/auth/reset-password?token=${encodeURIComponent(user.resetToken)}`;
       const html = `<p>Hi ${user.displayName || ''},</p><p>We received a request to reset your password. Click the link below to reset it (valid for 20 minutes):</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>If you didn't request this, ignore this message.</p>`;
       sendMail({ to: user.email, subject: 'Reset your ChitZ password', html }).catch((e) => console.warn('⚠️ reset-email send failed', e?.message || e));
     } catch (e) {
@@ -354,7 +360,12 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
     }
   }
 
-  res.json({ message: 'If an account exists with that email, a reset link has been sent.' });
+  const response = { message: 'If an account exists with that email, a reset link has been sent.' };
+  if (env.emailDevMode && env.nodeEnv !== 'production') {
+    // Always include a URL in dev so frontend can test the flow without SMTP.
+    response.devResetUrl = user ? `${base}/auth/reset-password?token=${encodeURIComponent(user.resetToken)}` : devResetUrl;
+  }
+  res.json(response);
 }));
 
 router.post('/login', asyncHandler(async (req, res) => {

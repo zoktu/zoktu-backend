@@ -11,7 +11,7 @@ const router = Router();
 export const messages = new Map();
 // Simple in-memory throttle per IP+room to avoid abusive polling
 const lastMessageRequest = new Map(); // key: `${ip}:${roomId}` -> timestamp
-const MIN_INTERVAL_MS = 800; // minimum allowed interval between requests per IP+room
+const MIN_INTERVAL_MS = 800; // minimum allowed interval between requests per IP+room (production)
 
 // Per-user message rate tracking and mute map
 const userMessageWindow = new Map(); // userId -> { count, windowStart }
@@ -254,8 +254,9 @@ router.get('/rooms/:roomId/messages', (req, res) => {
   const ip = req.ip || req.connection.remoteAddress || 'unknown';
   const key = `${ip}:${roomId}`;
   const now = Date.now();
+  const effectiveMin = (env?.nodeEnv === 'production') ? MIN_INTERVAL_MS : 0;
   const last = lastMessageRequest.get(key) || 0;
-  if (now - last < MIN_INTERVAL_MS) {
+  if (effectiveMin && (now - last < effectiveMin)) {
     // too many requests
     return res.status(429).json({ message: 'Too many requests' });
   }
