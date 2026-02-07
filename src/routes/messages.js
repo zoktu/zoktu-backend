@@ -262,13 +262,32 @@ router.get('/rooms/:roomId/messages', (req, res) => {
   }
   lastMessageRequest.set(key, now);
 
-  // load from DB (most recent first)
+  // load from DB (most recent first or paginated)
   (async () => {
     try {
       const roomDoc = await Room.findById(roomId).lean().catch(() => null);
       const Model = getModelForRoom(roomDoc);
       const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
-      let docs = await Model.find({ roomId }).sort({ createdAt: -1 }).limit(limit).lean();
+      const before = req.query.before; // cursor for pagination (messageId or timestamp)
+
+      let query = { roomId };
+      if (before) {
+        // Fetch messages older than the cursor
+        try {
+          const cursorDoc = await Model.findById(before).lean();
+          if (cursorDoc?.createdAt) {
+            query.createdAt = { $lt: cursorDoc.createdAt };
+          }
+        } catch (e) {
+          // If before is a timestamp instead of ID
+          const ts = new Date(before);
+          if (!isNaN(ts.getTime())) {
+            query.createdAt = { $lt: ts };
+          }
+        }
+      }
+
+      let docs = await Model.find(query).sort({ createdAt: -1 }).limit(limit).lean();
 
       // identify current user (optional) and filter blocked users' messages
       const auth = await getAuthIdentity(req);
