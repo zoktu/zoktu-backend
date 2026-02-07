@@ -19,7 +19,9 @@ export const env = {
   port: process.env.PORT || 4000,
   mongoUri: buildMongoUri(),
   jwtSecret: process.env.JWT_SECRET || 'change-me',
-  clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173'
+  clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
+  // Prefer explicit backend origin for building API links (e.g., email verification)
+  apiOrigin: process.env.API_ORIGIN || process.env.BACKEND_ORIGIN || ''
 };
 
 // Dev helpers (never enable in production)

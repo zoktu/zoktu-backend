@@ -16,8 +16,8 @@ const DELETION_GRACE_PERIOD_MS = 10 * 24 * 60 * 60 * 1000;
 const EMAIL_VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
 
 const buildEmailVerifyUrl = ({ token }) => {
-  const base = String(env.clientOrigin || '').replace(/\/$/, '');
-  // Prefer verifying via backend directly so it works even if frontend has no route.
+  // Prefer backend origin if explicitly provided; fallback to client origin with dev proxy
+  const base = String(env.apiOrigin || env.clientOrigin || '').replace(/\/$/, '');
   return `${base}/api/auth/verify-email?token=${encodeURIComponent(String(token))}`;
 };
 
@@ -344,7 +344,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
   // In dev, always return a reset URL (even if user doesn't exist) to avoid account enumeration
   // while still letting developers test the reset flow without SMTP.
   const devToken = `reset-dev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const devResetUrl = `${base}/auth/reset-password?token=${encodeURIComponent(user?.resetToken || devToken)}`;
+  const devResetUrl = `${base}/forgot-password?token=${encodeURIComponent(user?.resetToken || devToken)}`;
 
   if (user) {
     user.resetToken = `reset-${Date.now()}`;
@@ -352,7 +352,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
     try { await persistUserToDb(user); } catch (_) {}
     // send reset email (non-blocking)
     try {
-      const resetUrl = `${base}/auth/reset-password?token=${encodeURIComponent(user.resetToken)}`;
+      const resetUrl = `${base}/forgot-password?token=${encodeURIComponent(user.resetToken)}`;
       const html = `<p>Hi ${user.displayName || ''},</p><p>We received a request to reset your password. Click the link below to reset it (valid for 20 minutes):</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>If you didn't request this, ignore this message.</p>`;
       sendMail({ to: user.email, subject: 'Reset your Zoktu password', html }).catch((e) => console.warn('⚠️ reset-email send failed', e?.message || e));
     } catch (e) {
@@ -363,7 +363,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
   const response = { message: 'If an account exists with that email, a reset link has been sent.' };
   if (env.emailDevMode && env.nodeEnv !== 'production') {
     // Always include a URL in dev so frontend can test the flow without SMTP.
-    response.devResetUrl = user ? `${base}/auth/reset-password?token=${encodeURIComponent(user.resetToken)}` : devResetUrl;
+    response.devResetUrl = user ? `${base}/forgot-password?token=${encodeURIComponent(user.resetToken)}` : devResetUrl;
   }
   res.json(response);
 }));
