@@ -59,9 +59,14 @@ const issueEmailVerification = async ({ email, displayName }) => {
     </div>
   `;
 
-  sendMail({ to: cleanEmail, subject: 'Verify your Zoktu email', html }).catch((e) => {
+  try {
+    const info = await sendMail({ to: cleanEmail, subject: 'Verify your Zoktu email', html });
+    const msgId = info?.messageId ? String(info.messageId) : null;
+    const resp = info?.response ? String(info.response) : null;
+    console.log('✅ verify-email sent', { to: cleanEmail, messageId: msgId, response: resp });
+  } catch (e) {
     console.warn('⚠️ verify-email send failed', e?.message || e);
-  });
+  }
 
   return { token, expires };
 };
