@@ -340,18 +340,31 @@ router.post('/', asyncHandler(async (req, res) => {
     return res.status(401).json({ message: 'Invalid token' });
   }
 
-  if (!payload || payload.userType !== 'registered') {
+  // Resolve the latest user record so we don't rely solely on a potentially stale JWT payload.
+  let userRecord = null;
+  if (payload?.email && users.has(payload.email)) {
+    userRecord = users.get(payload.email);
+  }
+  if (!userRecord && payload?.id && users.has(payload.id)) {
+    userRecord = users.get(payload.id);
+  }
+  if (!userRecord && payload?.id) {
+    // Fallback to DB lookup using multiple identifiers (id, guestId, email)
+    try {
+      const id = String(payload.id);
+      const email = payload.email ? String(payload.email) : null;
+      const or = [{ _id: id }, { guestId: id }];
+      if (email) or.push({ email });
+      userRecord = await User.findOne({ $or: or }).lean().exec();
+    } catch (e) {}
+  }
+
+  const effectiveUserType = (userRecord && userRecord.userType) || payload?.userType;
+  if (!effectiveUserType || effectiveUserType !== 'registered') {
     return res.status(403).json({ message: 'Only registered users can create rooms' });
   }
 
   // Require email-verified for room creation
-  let userRecord = null;
-  if (payload.email && users.has(payload.email)) userRecord = users.get(payload.email);
-  if (!userRecord && payload.id) userRecord = users.get(payload.id) || null;
-  if (!userRecord) {
-    // fallback to DB lookup
-    try { userRecord = await User.findById(payload.id).lean().exec(); } catch (e) {}
-  }
   const emailVerified = Boolean(userRecord && (userRecord.emailVerified || userRecord.emailVerified === true));
   if (!emailVerified) {
     return res.status(403).json({ message: 'Only email-verified registered users can create rooms' });
