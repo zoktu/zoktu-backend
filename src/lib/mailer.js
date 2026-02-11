@@ -1,5 +1,10 @@
 import nodemailer from 'nodemailer';
+import sgMail from '@sendgrid/mail';
 import { env } from '../config/env.js';
+
+const sendgridApiKey = String(process.env.SENDGRID_API_KEY || '').trim();
+const sendgridEnabled = Boolean(sendgridApiKey);
+const sendgridResidency = String(process.env.SENDGRID_DATA_RESIDENCY || '').trim().toLowerCase();
 
 const smtpConfig = {
   enabled: Boolean(env.smtpEnabled),
@@ -14,7 +19,13 @@ const smtpConfig = {
 
 let transporter = null;
 
-if (smtpConfig.enabled) {
+if (sendgridEnabled) {
+  sgMail.setApiKey(sendgridApiKey);
+  if (sendgridResidency === 'eu') {
+    sgMail.setDataResidency('eu');
+  }
+  console.log('✅ SendGrid mailer enabled');
+} else if (smtpConfig.enabled) {
   transporter = nodemailer.createTransport({
     host: smtpConfig.host,
     port: smtpConfig.port,
@@ -42,11 +53,24 @@ if (smtpConfig.enabled) {
 }
 
 export async function sendMail({ to, subject, text, html, from }) {
+  const resolvedFrom = from || smtpConfig.from;
+
+  if (sendgridEnabled) {
+    return sgMail.send({
+      to,
+      from: resolvedFrom,
+      subject,
+      text,
+      html
+    });
+  }
+
   if (!transporter) {
     throw new Error('SMTP is disabled or not configured');
   }
+
   const mailOptions = {
-    from: from || smtpConfig.from,
+    from: resolvedFrom,
     to,
     subject,
     text,
