@@ -6,7 +6,6 @@ import { env } from '../config/env.js';
 import Room from '../models/Room.js';
 import User from '../models/User.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
-import cloudinary from 'cloudinary';
 
 const router = Router();
 export const messages = new Map();
@@ -22,35 +21,6 @@ const MESSAGE_LIMIT = 8; // more than this in window => mute
 const MUTE_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_WORDS = 200; // maximum words allowed per message
 
-// Cloudinary moderation config (for auto-blocking adult/erotic images)
-cloudinary.v2.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
-const MODERATION_PROVIDER = process.env.CLOUDINARY_MODERATION || 'aws_rek';
-
-const getModerationStatus = async (publicId) => {
-  if (!publicId) return { status: null };
-  try {
-    const resource = await cloudinary.v2.api.resource(publicId, { resource_type: 'image', moderation: true });
-    const mods = Array.isArray(resource?.moderation) ? resource.moderation : [];
-    const entry = mods.find(m => String(m.kind || '') === String(MODERATION_PROVIDER)) || mods[0];
-    const status = entry?.status || null;
-    return { status };
-  } catch (e) {
-    return { status: null };
-  }
-};
-
-const destroyCloudinaryImage = async (publicId) => {
-  if (!publicId) return;
-  try {
-    await cloudinary.v2.uploader.destroy(publicId, { resource_type: 'image', invalidate: true });
-  } catch (e) {
-    // ignore
-  }
-};
 
 const isUserMuted = (userId) => {
   if (!userId) return false;
@@ -599,26 +569,6 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     // best-effort
   }
 
-  // Adult/erotic image moderation: auto-reject if not approved
-  try {
-    const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
-    const imageAttachments = attachments.filter(a => a && String(a.mimeType || '').startsWith('image'));
-    if (imageAttachments.length) {
-      for (const a of imageAttachments) {
-        const publicId = a?.publicId ? String(a.publicId) : '';
-        if (!publicId) {
-          return res.status(400).json({ message: 'Image moderation required' });
-        }
-        const { status } = await getModerationStatus(publicId);
-        if (!status || status !== 'approved') {
-          await destroyCloudinaryImage(publicId);
-          return res.status(400).json({ message: 'Image blocked by safety filter' });
-        }
-      }
-    }
-  } catch (e) {
-    return res.status(400).json({ message: 'Image moderation failed' });
-  }
 
   // Privacy enforcement for DMs: if the other user only allows friends to DM, require friendship.
   try {
