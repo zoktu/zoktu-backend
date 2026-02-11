@@ -216,10 +216,12 @@ const getAuthIdentity = async (req) => {
     }
   } catch (e) {}
 
-  // Expand from payload.id if it's a mongo _id
+  // Expand from payload.id to resolve guestId <-> _id
   try {
-    if (payload.id && looksLikeObjectId(payload.id)) {
-      const u = await User.findById(String(payload.id)).lean().catch(() => null);
+    if (payload.id) {
+      const u = await User.findOne({ $or: [{ _id: String(payload.id) }, { guestId: String(payload.id) }] })
+        .lean()
+        .catch(() => null);
       if (u) {
         add(u._id);
         add(u.guestId);
@@ -638,8 +640,19 @@ router.delete('/messages/:id', asyncHandler(async (req, res) => {
 
   const { doc, Model } = await findMessageDocById(id);
   if (!doc) return res.status(404).json({ message: 'Message not found' });
-  const allowed = auth.ids.includes(String(doc.senderId));
-  if (!allowed) return res.status(403).json({ message: 'Forbidden' });
+  const isSender = auth.ids.includes(String(doc.senderId));
+
+  let isModerator = false;
+  try {
+    const roomDoc = await Room.findById(String(doc.roomId)).select('owner admins type category').lean().catch(() => null);
+    if (roomDoc && !isDmRoomDoc(roomDoc)) {
+      const ownerId = roomDoc.owner ? String(roomDoc.owner) : null;
+      const adminIds = Array.isArray(roomDoc.admins) ? roomDoc.admins.map(String) : [];
+      isModerator = (ownerId && auth.ids.includes(ownerId)) || adminIds.some((a) => auth.ids.includes(String(a)));
+    }
+  } catch (e) {}
+
+  if (!isSender && !isModerator) return res.status(403).json({ message: 'Forbidden' });
 
   // For DM rooms: soft-delete so both sides see "Message deleted" (instead of disappearing).
   try {

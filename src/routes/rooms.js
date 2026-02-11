@@ -554,9 +554,15 @@ router.post('/:id/ban', asyncHandler(async (req, res) => {
   const roomDoc = await Room.findById(id).lean().catch(() => null);
   if (!roomDoc && !rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
 
-  const requesterId = payload.id;
-  const isAdmin = Array.isArray(roomDoc?.admins) && roomDoc.admins.includes(requesterId);
-  const isOwner = roomDoc && ((roomDoc.owner === requesterId) || (roomDoc.createdBy === requesterId));
+  const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+  const requesterSet = new Set(uniqStrings(requesterExpanded));
+  const requesterCanonical = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
+  if (requesterCanonical) requesterSet.add(String(requesterCanonical));
+
+  const ownerId = roomDoc?.owner || roomDoc?.createdBy || null;
+  const admins = Array.isArray(roomDoc?.admins) ? roomDoc.admins.map(String) : [];
+  const isOwner = ownerId ? Array.from(requesterSet).some((rid) => String(ownerId) === String(rid)) : false;
+  const isAdmin = admins.length ? Array.from(requesterSet).some((rid) => admins.includes(String(rid))) : false;
   if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Only owner or admins can ban users' });
 
   try {
@@ -591,6 +597,13 @@ router.post('/:id/ban', asyncHandler(async (req, res) => {
         await Room.findByIdAndUpdate(id, updateObj, { upsert: false }).catch(() => null);
       }
 
+      try {
+        const fresh = await Room.findById(id).lean().catch(() => null);
+        if (fresh) {
+          rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
+        }
+      } catch (e) {}
+
       return res.json({ message: 'Banned', targets: uniqueBannedIds, ips: bannedIpList });
     } catch (e) {
       console.warn('Ban flow failure', e?.message || e);
@@ -615,9 +628,15 @@ router.post('/:id/mute', asyncHandler(async (req, res) => {
   const roomDoc = await Room.findById(id).lean().catch(() => null);
   if (!roomDoc && !rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
 
-  const requesterId = payload.id;
-  const isAdmin = Array.isArray(roomDoc?.admins) && roomDoc.admins.includes(requesterId);
-  const isOwner = roomDoc && ((roomDoc.owner === requesterId) || (roomDoc.createdBy === requesterId));
+  const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+  const requesterSet = new Set(uniqStrings(requesterExpanded));
+  const requesterCanonical = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
+  if (requesterCanonical) requesterSet.add(String(requesterCanonical));
+
+  const ownerId = roomDoc?.owner || roomDoc?.createdBy || null;
+  const admins = Array.isArray(roomDoc?.admins) ? roomDoc.admins.map(String) : [];
+  const isOwner = ownerId ? Array.from(requesterSet).some((rid) => String(ownerId) === String(rid)) : false;
+  const isAdmin = admins.length ? Array.from(requesterSet).some((rid) => admins.includes(String(rid))) : false;
   if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Only owner or admins can mute users' });
 
   const until = new Date(Date.now() + (Number(durationMs) || (5 * 60 * 1000)));
@@ -628,10 +647,103 @@ router.post('/:id/mute', asyncHandler(async (req, res) => {
     if (ip) {
       await Room.findByIdAndUpdate(id, { $push: { mutedIPs: { ip, until } } }).catch(() => null);
     }
+
+    try {
+      const fresh = await Room.findById(id).lean().catch(() => null);
+      if (fresh) {
+        rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
+      }
+    } catch (e) {}
     return res.json({ message: 'Muted', targetUserId, ip, until });
   } catch (e) {
     console.warn('Mute failed', e?.message || e);
     return res.status(500).json({ message: 'Failed to mute' });
+  }
+}));
+
+// Unban a user or IP from a room (owner/admin only)
+router.post('/:id/unban', asyncHandler(async (req, res) => {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ message: 'Unauthorized' });
+  let payload;
+  try { payload = jwt.verify(token, env.jwtSecret); } catch (e) { return res.status(401).json({ message: 'Invalid token' }); }
+
+  const id = req.params.id;
+  const { targetUserId, ip } = req.body || {};
+  const roomDoc = await Room.findById(id).lean().catch(() => null);
+  if (!roomDoc && !rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
+
+  const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+  const requesterSet = new Set(uniqStrings(requesterExpanded));
+  const requesterCanonical = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
+  if (requesterCanonical) requesterSet.add(String(requesterCanonical));
+
+  const ownerId = roomDoc?.owner || roomDoc?.createdBy || null;
+  const admins = Array.isArray(roomDoc?.admins) ? roomDoc.admins.map(String) : [];
+  const isOwner = ownerId ? Array.from(requesterSet).some((rid) => String(ownerId) === String(rid)) : false;
+  const isAdmin = admins.length ? Array.from(requesterSet).some((rid) => admins.includes(String(rid))) : false;
+  if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Only owner or admins can unban users' });
+
+  const updateObj = {};
+  if (targetUserId) updateObj.$pull = { bannedUsers: String(targetUserId) };
+  if (ip) updateObj.$pull = Object.assign(updateObj.$pull || {}, { bannedIPs: String(ip) });
+
+  if (!Object.keys(updateObj).length) return res.status(400).json({ message: 'targetUserId or ip required' });
+
+  try {
+    await Room.findByIdAndUpdate(id, updateObj, { upsert: false }).catch(() => null);
+    const fresh = await Room.findById(id).lean().catch(() => null);
+    if (fresh) {
+      rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
+    }
+    return res.json({ message: 'Unbanned', targetUserId, ip });
+  } catch (e) {
+    console.warn('Unban failed', e?.message || e);
+    return res.status(500).json({ message: 'Failed to unban' });
+  }
+}));
+
+// Unmute a user or IP from a room (owner/admin only)
+router.post('/:id/unmute', asyncHandler(async (req, res) => {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ message: 'Unauthorized' });
+  let payload;
+  try { payload = jwt.verify(token, env.jwtSecret); } catch (e) { return res.status(401).json({ message: 'Invalid token' }); }
+
+  const id = req.params.id;
+  const { targetUserId, ip } = req.body || {};
+  const roomDoc = await Room.findById(id).lean().catch(() => null);
+  if (!roomDoc && !rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
+
+  const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+  const requesterSet = new Set(uniqStrings(requesterExpanded));
+  const requesterCanonical = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
+  if (requesterCanonical) requesterSet.add(String(requesterCanonical));
+
+  const ownerId = roomDoc?.owner || roomDoc?.createdBy || null;
+  const admins = Array.isArray(roomDoc?.admins) ? roomDoc.admins.map(String) : [];
+  const isOwner = ownerId ? Array.from(requesterSet).some((rid) => String(ownerId) === String(rid)) : false;
+  const isAdmin = admins.length ? Array.from(requesterSet).some((rid) => admins.includes(String(rid))) : false;
+  if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Only owner or admins can unmute users' });
+
+  const updateObj = {};
+  if (targetUserId) updateObj.$pull = { mutedUsers: { userId: String(targetUserId) } };
+  if (ip) updateObj.$pull = Object.assign(updateObj.$pull || {}, { mutedIPs: { ip: String(ip) } });
+
+  if (!Object.keys(updateObj).length) return res.status(400).json({ message: 'targetUserId or ip required' });
+
+  try {
+    await Room.findByIdAndUpdate(id, updateObj, { upsert: false }).catch(() => null);
+    const fresh = await Room.findById(id).lean().catch(() => null);
+    if (fresh) {
+      rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
+    }
+    return res.json({ message: 'Unmuted', targetUserId, ip });
+  } catch (e) {
+    console.warn('Unmute failed', e?.message || e);
+    return res.status(500).json({ message: 'Failed to unmute' });
   }
 }));
 
