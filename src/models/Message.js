@@ -7,6 +7,7 @@ const MessageSchema = new mongoose.Schema({
   content: { type: String, required: true },
   type: { type: String, default: 'text' },
   replyTo: { type: String },
+  attachments: [{ url: String, fileName: String, fileSize: Number, mimeType: String, publicId: String }],
   createdAt: { type: Date, default: Date.now },
   editedAt: { type: Date },
   reactions: [{ emoji: String, userId: String, createdAt: Date }],

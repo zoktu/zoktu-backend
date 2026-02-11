@@ -14,11 +14,12 @@ cloudinary.v2.config({
 router.get('/sign', (req, res) => {
   try {
     const folder = req.query.folder || process.env.CLOUDINARY_DEFAULT_FOLDER || 'zoktu';
+    const moderation = req.query.moderation || process.env.CLOUDINARY_MODERATION || null;
     const timestamp = Math.floor(Date.now() / 1000);
     // Only sign selected params (folder and timestamp). Add transformations here if needed.
-    const paramsToSign = { folder, timestamp };
+    const paramsToSign = moderation ? { folder, moderation, timestamp } : { folder, timestamp };
     const signature = cloudinary.v2.utils.api_sign_request(paramsToSign, process.env.CLOUDINARY_API_SECRET);
-    return res.json({ signature, api_key: process.env.CLOUDINARY_API_KEY, timestamp, folder });
+    return res.json({ signature, api_key: process.env.CLOUDINARY_API_KEY, timestamp, folder, moderation });
   } catch (err) {
     console.error('Failed to sign upload request', err);
     return res.status(500).json({ message: 'Failed to create upload signature' });

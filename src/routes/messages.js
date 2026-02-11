@@ -6,6 +6,7 @@ import { env } from '../config/env.js';
 import Room from '../models/Room.js';
 import User from '../models/User.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
+import cloudinary from 'cloudinary';
 
 const router = Router();
 export const messages = new Map();
@@ -20,6 +21,36 @@ const MESSAGE_WINDOW_MS = 15000; // 15s window
 const MESSAGE_LIMIT = 8; // more than this in window => mute
 const MUTE_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_WORDS = 200; // maximum words allowed per message
+
+// Cloudinary moderation config (for auto-blocking adult/erotic images)
+cloudinary.v2.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+const MODERATION_PROVIDER = process.env.CLOUDINARY_MODERATION || 'aws_rek';
+
+const getModerationStatus = async (publicId) => {
+  if (!publicId) return { status: null };
+  try {
+    const resource = await cloudinary.v2.api.resource(publicId, { resource_type: 'image', moderation: true });
+    const mods = Array.isArray(resource?.moderation) ? resource.moderation : [];
+    const entry = mods.find(m => String(m.kind || '') === String(MODERATION_PROVIDER)) || mods[0];
+    const status = entry?.status || null;
+    return { status };
+  } catch (e) {
+    return { status: null };
+  }
+};
+
+const destroyCloudinaryImage = async (publicId) => {
+  if (!publicId) return;
+  try {
+    await cloudinary.v2.uploader.destroy(publicId, { resource_type: 'image', invalidate: true });
+  } catch (e) {
+    // ignore
+  }
+};
 
 const isUserMuted = (userId) => {
   if (!userId) return false;
@@ -323,6 +354,7 @@ router.get('/rooms/:roomId/messages', (req, res) => {
           senderName: d.senderName,
           content: d.content,
           type: d.type,
+          attachments: Array.isArray(d.attachments) ? d.attachments : [],
           replyTo: d.replyTo,
           timestamp: d.createdAt,
           editedAt: d.editedAt,
@@ -567,6 +599,27 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     // best-effort
   }
 
+  // Adult/erotic image moderation: auto-reject if not approved
+  try {
+    const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
+    const imageAttachments = attachments.filter(a => a && String(a.mimeType || '').startsWith('image'));
+    if (imageAttachments.length) {
+      for (const a of imageAttachments) {
+        const publicId = a?.publicId ? String(a.publicId) : '';
+        if (!publicId) {
+          return res.status(400).json({ message: 'Image moderation required' });
+        }
+        const { status } = await getModerationStatus(publicId);
+        if (!status || status !== 'approved') {
+          await destroyCloudinaryImage(publicId);
+          return res.status(400).json({ message: 'Image blocked by safety filter' });
+        }
+      }
+    }
+  } catch (e) {
+    return res.status(400).json({ message: 'Image moderation failed' });
+  }
+
   // Privacy enforcement for DMs: if the other user only allows friends to DM, require friendship.
   try {
     if (isDmRoomDoc(roomDoc)) {
@@ -594,13 +647,24 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   }
 
   const Model = getModelForRoom(roomDoc);
+  const safeAttachments = Array.isArray(req.body?.attachments)
+    ? req.body.attachments.map(a => ({
+        url: a?.url,
+        fileName: a?.fileName,
+        fileSize: a?.fileSize,
+        mimeType: a?.mimeType,
+        publicId: a?.publicId
+      }))
+    : [];
+
   const doc = new Model({
     roomId,
     senderId: senderIdEffective,
     senderName: req.body.senderName || '',
     content,
     type: req.body.type || 'text',
-    replyTo: replyTo ? String(replyTo) : undefined
+    replyTo: replyTo ? String(replyTo) : undefined,
+    attachments: safeAttachments
   });
   await doc.save();
   // keep in-memory cache for quick reads (optional)
@@ -609,7 +673,17 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     list.push({ id: doc._id.toString(), roomId, senderId: doc.senderId, senderName: doc.senderName, content: doc.content, timestamp: doc.createdAt.toISOString(), replyTo: doc.replyTo });
     messages.set(roomId, list);
   } catch (e) {}
-  res.json({ id: doc._id.toString(), roomId, senderId: doc.senderId, senderName: doc.senderName, content: doc.content, timestamp: doc.createdAt.toISOString(), replyTo: doc.replyTo });
+  res.json({
+    id: doc._id.toString(),
+    roomId,
+    senderId: doc.senderId,
+    senderName: doc.senderName,
+    content: doc.content,
+    type: doc.type,
+    attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
+    timestamp: doc.createdAt.toISOString(),
+    replyTo: doc.replyTo
+  });
 }));
 
 router.patch('/messages/:id', asyncHandler(async (req, res) => {
@@ -726,14 +800,11 @@ router.delete('/messages/:id/reactions', asyncHandler(async (req, res) => {
   res.json({ message: 'reaction removed', id: doc._id.toString(), reactions: Array.isArray(doc.reactions) ? doc.reactions : [] });
 }));
 
-// Mark a message as viewed by the current user (per-user ephemeral view)
+// Mark a message as viewed by the current user (one-time preview per user)
 router.post('/messages/:id/view', asyncHandler(async (req, res) => {
   const id = req.params.id;
   const auth = await getAuthIdentity(req);
   if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
-
-  const durationSeconds = Number(req.body?.durationSeconds) || 10; // default 10s
-  const expireAt = new Date(Date.now() + Math.max(1, durationSeconds) * 1000);
 
   // Try to find the message in any of the collections
   let doc = await RoomMessage.findById(id).catch(() => null);
@@ -745,15 +816,12 @@ router.post('/messages/:id/view', asyncHandler(async (req, res) => {
   meta.viewed = Array.isArray(meta.viewed) ? meta.viewed : [];
   const existing = meta.viewed.find(v => auth.ids.includes(String(v.userId)));
   const now = new Date();
-  if (existing) {
-    existing.viewedAt = now;
-    existing.expireAt = expireAt;
-  } else {
-    meta.viewed.push({ userId: String(auth.primary), viewedAt: now, expireAt });
+  if (!existing) {
+    meta.viewed.push({ userId: String(auth.primary), viewedAt: now, expireAt: null });
   }
   doc.meta = meta;
   await doc.save();
-  res.json({ message: 'view recorded', expireAt: expireAt.toISOString() });
+  res.json({ message: 'view recorded', alreadyViewed: Boolean(existing) });
 }));
 
 export default router;
