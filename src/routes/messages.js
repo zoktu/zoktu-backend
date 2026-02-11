@@ -620,7 +620,17 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   // keep in-memory cache for quick reads (optional)
   try {
     const list = messages.get(roomId) || [];
-    list.push({ id: doc._id.toString(), roomId, senderId: doc.senderId, senderName: doc.senderName, content: doc.content, timestamp: doc.createdAt.toISOString(), replyTo: doc.replyTo });
+    list.push({
+      id: doc._id.toString(),
+      roomId,
+      senderId: doc.senderId,
+      senderName: doc.senderName,
+      content: doc.content,
+      type: doc.type,
+      attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
+      timestamp: doc.createdAt.toISOString(),
+      replyTo: doc.replyTo
+    });
     messages.set(roomId, list);
   } catch (e) {}
   res.json({
