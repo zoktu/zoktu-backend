@@ -5,7 +5,25 @@ import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import User from '../models/User.js';
 
-const extractAuthPayload = (req) => {
+const validateSessionFromPayload = async (payload) => {
+  if (!payload?.sessionId) {
+    return { error: { status: 401, message: 'Session expired' } };
+  }
+  const sessionId = String(payload.sessionId);
+  const session = await Session.findOne({ sessionId, revoked: { $ne: true } }).lean().exec();
+  if (!session) {
+    return { error: { status: 401, message: 'Session expired' } };
+  }
+  const payloadId = String(payload.id || payload.userId || payload._id || payload.guestId || '');
+  if (!payloadId || String(session.userId) !== payloadId) {
+    return { error: { status: 401, message: 'Session expired' } };
+  }
+
+  Session.updateOne({ sessionId }, { $set: { lastActive: new Date() } }).catch(() => {});
+  return { session };
+};
+
+const extractAuthPayload = async (req) => {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) {
@@ -13,7 +31,9 @@ const extractAuthPayload = (req) => {
   }
   try {
     const payload = jwt.verify(token, env.jwtSecret);
-    return { payload };
+    const sessionCheck = await validateSessionFromPayload(payload);
+    if (sessionCheck.error) return { error: sessionCheck.error };
+    return { payload, session: sessionCheck.session };
   } catch {
     return { error: { status: 401, message: 'Invalid token' } };
   }
@@ -47,7 +67,7 @@ const expandViewerIds = async (payload) => {
 
 // List sessions for a user (self only)
 router.get('/users/:id/sessions', asyncHandler(async (req, res) => {
-  const auth = extractAuthPayload(req);
+  const auth = await extractAuthPayload(req);
   if (auth.error) return res.status(auth.error.status).json({ message: auth.error.message });
   const payload = auth.payload;
 
@@ -63,7 +83,7 @@ router.get('/users/:id/sessions', asyncHandler(async (req, res) => {
 
 // List sessions for the currently authenticated user
 router.get('/me', asyncHandler(async (req, res) => {
-  const auth = extractAuthPayload(req);
+  const auth = await extractAuthPayload(req);
   if (auth.error) return res.status(auth.error.status).json({ message: auth.error.message });
 
   const viewerIds = await expandViewerIds(auth.payload);
@@ -81,7 +101,7 @@ router.get('/me', asyncHandler(async (req, res) => {
 
 // Revoke a session (self only)
 router.post('/:sessionId/revoke', asyncHandler(async (req, res) => {
-  const auth = extractAuthPayload(req);
+  const auth = await extractAuthPayload(req);
   if (auth.error) return res.status(auth.error.status).json({ message: auth.error.message });
   const payload = auth.payload;
 
@@ -95,6 +115,7 @@ router.post('/:sessionId/revoke', asyncHandler(async (req, res) => {
   }
 
   session.revoked = true;
+  session.revokedAt = new Date();
   await session.save();
   res.json({ message: 'revoked' });
 }));

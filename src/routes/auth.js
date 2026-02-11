@@ -85,6 +85,13 @@ const getRequestIp = (req) => {
   return req.ip || req.connection?.remoteAddress || null;
 };
 
+const resolveClientPlatform = (req) => {
+  const headerValue = req.headers['x-client-platform'] || req.headers['x-platform'];
+  const bodyValue = req.body?.platform;
+  const platform = String(bodyValue || headerValue || 'web').trim().toLowerCase();
+  return platform || 'web';
+};
+
 const enforceDeletionWindow = (user) => {
   if (!user || !user.deletePending || !user.deleteScheduledFor) {
     return { user, expired: false };
@@ -132,7 +139,26 @@ const finalizeDeletionIfDue = async (user) => {
   return { deleted: true };
 };
 
-const extractAuthPayload = (req) => {
+const validateSessionFromPayload = async (payload) => {
+  if (!payload?.sessionId) {
+    return { error: { status: 401, message: 'Session expired' } };
+  }
+  const sessionId = String(payload.sessionId);
+  const session = await Session.findOne({ sessionId, revoked: { $ne: true } }).lean().exec();
+  if (!session) {
+    return { error: { status: 401, message: 'Session expired' } };
+  }
+  const payloadId = String(payload.id || payload.userId || payload._id || payload.guestId || '');
+  if (!payloadId || String(session.userId) !== payloadId) {
+    return { error: { status: 401, message: 'Session expired' } };
+  }
+
+  // Best-effort last active update
+  Session.updateOne({ sessionId }, { $set: { lastActive: new Date() } }).catch(() => {});
+  return { session };
+};
+
+const extractAuthPayload = async (req) => {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) {
@@ -140,7 +166,9 @@ const extractAuthPayload = (req) => {
   }
   try {
     const payload = jwt.verify(token, env.jwtSecret);
-    return { payload };
+    const sessionCheck = await validateSessionFromPayload(payload);
+    if (sessionCheck.error) return { error: sessionCheck.error };
+    return { payload, session: sessionCheck.session };
   } catch {
     return { error: { status: 401, message: 'Invalid token' } };
   }
@@ -154,8 +182,8 @@ const resolveUserFromPayload = (payload) => {
   return enforceDeletionWindow(candidate);
 };
 
-const requireRegisteredUser = (req) => {
-  const auth = extractAuthPayload(req);
+const requireRegisteredUser = async (req) => {
+  const auth = await extractAuthPayload(req);
   if (auth.error) return auth;
 
   const { user, expired } = resolveUserFromPayload(auth.payload);
@@ -171,7 +199,12 @@ const requireRegisteredUser = (req) => {
   return { user, payload: auth.payload };
 };
 
-const signToken = (user) => jwt.sign({ id: user.id, email: user.email, userType: user.userType || 'registered' }, env.jwtSecret, { expiresIn: '7d' });
+const signToken = (user, sessionId) => jwt.sign({
+  id: user.id,
+  email: user.email,
+  userType: user.userType || 'registered',
+  sessionId: sessionId || undefined
+}, env.jwtSecret, { expiresIn: '7d' });
 
 const sanitizeUser = (user) => {
   if (!user) return null;
@@ -189,13 +222,22 @@ const sanitizeUser = (user) => {
 
 const createSessionForUser = async (userId, req) => {
   try {
+    const platform = resolveClientPlatform(req);
+    const cleanUserId = userId ? String(userId) : null;
+    if (cleanUserId) {
+      await Session.updateMany(
+        { userId: cleanUserId, platform, revoked: { $ne: true } },
+        { $set: { revoked: true, revokedAt: new Date() } }
+      ).exec();
+    }
     const sessionId = (typeof randomUUID === 'function') ? randomUUID() : `s-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
     const ip = getRequestIp(req);
     const riskInfo = await assessIpRisk(ip).catch(() => ({ risk: false }));
     const doc = new Session({
       sessionId,
-      userId: userId || null,
+      userId: cleanUserId,
       deviceId: req.body?.deviceId || req.headers['x-device-id'] || null,
+      platform,
       userAgent: req.headers['user-agent'] || null,
       ip,
       risk: Boolean(riskInfo?.risk),
@@ -265,7 +307,7 @@ router.post('/signup', asyncHandler(async (req, res) => {
   if (!email || !password) return res.status(400).json({ message: 'email and password required' });
 
   // If request contains an auth token, and it's a guest, convert that guest
-  const auth = extractAuthPayload(req);
+  const auth = await extractAuthPayload(req);
   let convertingGuest = null;
   console.log('   signup auth result:', auth.error ? { error: auth.error.message } : { payload: auth.payload });
   if (!auth.error && auth.payload && auth.payload.userType === 'guest') {
@@ -314,8 +356,11 @@ router.post('/signup', asyncHandler(async (req, res) => {
       if (merged?.email) users.set(merged.email, merged);
       if (merged?.id) users.set(String(merged.id), merged);
       if (merged?.guestId) users.set(String(merged.guestId), merged);
-      const token = signToken(merged || convertingGuest);
       const sessionId = await createSessionForUser((merged || convertingGuest).id, req);
+      if (!sessionId) {
+        return res.status(500).json({ message: 'Unable to create session' });
+      }
+      const token = signToken((merged || convertingGuest), sessionId);
 
       // Fire-and-forget verification email
       issueEmailVerification({ email, displayName: convertingGuest.displayName || convertingGuest.name || email }).catch(() => {});
@@ -345,8 +390,11 @@ router.post('/signup', asyncHandler(async (req, res) => {
     // non-fatal: continue using in-memory copy
   }
   users.set(email, user);
-  const token = signToken(user);
   const sessionId = await createSessionForUser(user.id, req);
+  if (!sessionId) {
+    return res.status(500).json({ message: 'Unable to create session' });
+  }
+  const token = signToken(user, sessionId);
 
   // Fire-and-forget verification email
   issueEmailVerification({ email, displayName: user.displayName || user.name || email }).catch(() => {});
@@ -468,8 +516,11 @@ router.post('/login', asyncHandler(async (req, res) => {
     users.set(user.email, user);
   }
 
-  const token = signToken(user);
   const sessionId = await createSessionForUser(user.id, req);
+  if (!sessionId) {
+    return res.status(500).json({ message: 'Unable to create session' });
+  }
+  const token = signToken(user, sessionId);
   res.json({ user: sanitizeUser(user), token, deletionRecovered: hadPendingDeletion, sessionId });
 }));
 
@@ -541,8 +592,11 @@ router.post('/guest', asyncHandler(async (req, res) => {
     guestUsernames.set(username.toLowerCase(), user.id);
     users.set(user.id, user);
 
-    const token = signToken(user);
     const sessionId = await createSessionForUser(user.id, req);
+    if (!sessionId) {
+      return res.status(500).json({ message: 'Unable to create session' });
+    }
+    const token = signToken(user, sessionId);
     return res.json({ user, token, sessionId });
   } catch (e) {
     // Duplicate key may happen if another request inserted the same name concurrently
@@ -555,8 +609,11 @@ router.post('/guest', asyncHandler(async (req, res) => {
     const user = { id: fallbackId, email: '', username, displayName: username, userType: 'guest' };
     guestUsernames.set(username.toLowerCase(), user.id);
     users.set(user.id, user);
-    const token = signToken(user);
     const sessionId = await createSessionForUser(user.id, req);
+    if (!sessionId) {
+      return res.status(500).json({ message: 'Unable to create session' });
+    }
+    const token = signToken(user, sessionId);
     return res.json({ user, token, sessionId });
   }
 }));
@@ -584,8 +641,8 @@ router.get('/check-username', (req, res) => {
   return res.json({ message: 'Username is available', available: true });
 });
 
-router.get('/me', (req, res) => {
-  const auth = extractAuthPayload(req);
+router.get('/me', asyncHandler(async (req, res) => {
+  const auth = await extractAuthPayload(req);
   if (auth.error) {
     return res.status(auth.error.status).json({ message: auth.error.message });
   }
@@ -597,63 +654,69 @@ router.get('/me', (req, res) => {
   }
 
   // Refresh from DB so profile fields persist across restarts / stale in-memory cache.
-  (async () => {
-    try {
-      let doc = null;
-      if (payload?.email) {
-        doc = await User.findOne({ email: String(payload.email) }).lean().exec().catch(() => null);
-      }
-      if (!doc && payload?.id) {
-        const id = String(payload.id);
-        doc = await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).lean().exec().catch(() => null);
-      }
-      if (doc) {
-        user = upsertUserInMemory({ ...doc, id: String(doc.guestId || doc._id) });
-      }
-    } catch (e) {
-      // ignore
+  try {
+    let doc = null;
+    if (payload?.email) {
+      doc = await User.findOne({ email: String(payload.email) }).lean().exec().catch(() => null);
     }
+    if (!doc && payload?.id) {
+      const id = String(payload.id);
+      doc = await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).lean().exec().catch(() => null);
+    }
+    if (doc) {
+      user = upsertUserInMemory({ ...doc, id: String(doc.guestId || doc._id) });
+    }
+  } catch (e) {
+    // ignore
+  }
 
-    // Finalize deletion if grace period elapsed (DB-backed)
-    try {
-      if (user?.deletePending && user?.deleteScheduledFor && Date.now() >= Number(user.deleteScheduledFor)) {
-        await finalizeDeletionIfDue(user);
-        return res.status(410).json({ message: 'Account already deleted' });
-      }
-    } catch (_) {}
+  // Finalize deletion if grace period elapsed (DB-backed)
+  try {
+    if (user?.deletePending && user?.deleteScheduledFor && Date.now() >= Number(user.deleteScheduledFor)) {
+      await finalizeDeletionIfDue(user);
+      return res.status(410).json({ message: 'Account already deleted' });
+    }
+  } catch (_) {}
 
-    const displayName = user?.displayName || user?.name || payload.email || 'User';
-    const createdAt = user?.createdAt || (payload?.iat ? new Date(Number(payload.iat) * 1000) : undefined);
-    const avatarUrl = (user?.avatar || user?.photoURL || '').toString().trim();
+  const displayName = user?.displayName || user?.name || payload.email || 'User';
+  const createdAt = user?.createdAt || (payload?.iat ? new Date(Number(payload.iat) * 1000) : undefined);
+  const avatarUrl = (user?.avatar || user?.photoURL || '').toString().trim();
 
-    return res.json({
-      id: user?.id || payload.id,
-      uid: user?.id || payload.id,
-      email: user?.email || payload.email,
-      userType: user?.userType || payload.userType,
-      premiumStatus: user?.premiumStatus,
-      name: user?.name || displayName,
-      displayName,
-      username: user?.username,
-      lastUsernameChange: user?.lastUsernameChange,
-      emailVerified: user?.emailVerified ?? false,
-      avatar: avatarUrl || null,
-      photoURL: avatarUrl || null,
-      bio: user?.bio || '',
-      gender: user?.gender || '',
-      location: user?.location || '',
-      dob: user?.dob || null,
-      settings: user?.settings || {},
-      isOnline: user?.isOnline ?? false,
-      lastSeen: user?.lastSeen || null,
-      createdAt
-    });
-  })();
-});
+  return res.json({
+    id: user?.id || payload.id,
+    uid: user?.id || payload.id,
+    email: user?.email || payload.email,
+    userType: user?.userType || payload.userType,
+    premiumStatus: user?.premiumStatus,
+    name: user?.name || displayName,
+    displayName,
+    username: user?.username,
+    lastUsernameChange: user?.lastUsernameChange,
+    emailVerified: user?.emailVerified ?? false,
+    avatar: avatarUrl || null,
+    photoURL: avatarUrl || null,
+    bio: user?.bio || '',
+    gender: user?.gender || '',
+    location: user?.location || '',
+    dob: user?.dob || null,
+    settings: user?.settings || {},
+    isOnline: user?.isOnline ?? false,
+    lastSeen: user?.lastSeen || null,
+    createdAt
+  });
+}));
 
-router.post('/logout', (_req, res) => {
+router.post('/logout', asyncHandler(async (req, res) => {
+  const auth = await extractAuthPayload(req);
+  if (!auth.error && auth.payload?.sessionId) {
+    const sessionId = String(auth.payload.sessionId);
+    await Session.updateOne(
+      { sessionId },
+      { $set: { revoked: true, revokedAt: new Date() } }
+    ).exec().catch(() => {});
+  }
   res.json({ message: 'logged out' });
-});
+}));
 
 router.post('/resend-verification', asyncHandler(async (req, res) => {
   const { email } = req.body || {};
@@ -720,7 +783,7 @@ router.get('/verify-email', asyncHandler(async (req, res) => {
 }));
 
 router.post('/verify-email', asyncHandler(async (req, res) => {
-  const auth = requireRegisteredUser(req);
+  const auth = await requireRegisteredUser(req);
   if (auth.error) {
     return res.status(auth.error.status).json({ message: auth.error.message });
   }
@@ -744,7 +807,7 @@ router.post('/change-password', asyncHandler(async (req, res) => {
   if (newPassword.length < 6) {
     return res.status(400).json({ message: 'New password must be at least 6 characters' });
   }
-  const auth = requireRegisteredUser(req);
+  const auth = await requireRegisteredUser(req);
   if (auth.error) {
     return res.status(auth.error.status).json({ message: auth.error.message });
   }
@@ -787,8 +850,8 @@ router.post('/change-password', asyncHandler(async (req, res) => {
   res.json({ message: 'Password updated successfully' });
 }));
 
-router.get('/deletion-status', (req, res) => {
-  const auth = extractAuthPayload(req);
+router.get('/deletion-status', asyncHandler(async (req, res) => {
+  const auth = await extractAuthPayload(req);
   if (auth.error) {
     return res.status(auth.error.status).json({ message: auth.error.message });
   }
@@ -798,24 +861,22 @@ router.get('/deletion-status', (req, res) => {
     return res.status(400).json({ message: 'Only registered accounts can schedule deletion' });
   }
 
-  (async () => {
-    const doc = await User.findOne({ email }).select('deletePending deleteScheduledFor').lean().exec().catch(() => null);
-    if (!doc) {
-      return res.status(404).json({ message: 'User not found' });
-    }
+  const doc = await User.findOne({ email }).select('deletePending deleteScheduledFor').lean().exec().catch(() => null);
+  if (!doc) {
+    return res.status(404).json({ message: 'User not found' });
+  }
 
-    const scheduledFor = Number(doc.deleteScheduledFor || 0);
-    const pending = Boolean(doc.deletePending && scheduledFor && scheduledFor > Date.now());
-    return res.json({
-      pending,
-      scheduledFor: pending ? scheduledFor : null,
-      daysRemaining: pending ? Math.max(0, Math.ceil((scheduledFor - Date.now()) / (24 * 60 * 60 * 1000))) : 0
-    });
-  })();
-});
+  const scheduledFor = Number(doc.deleteScheduledFor || 0);
+  const pending = Boolean(doc.deletePending && scheduledFor && scheduledFor > Date.now());
+  return res.json({
+    pending,
+    scheduledFor: pending ? scheduledFor : null,
+    daysRemaining: pending ? Math.max(0, Math.ceil((scheduledFor - Date.now()) / (24 * 60 * 60 * 1000))) : 0
+  });
+}));
 
 router.post('/delete-account', asyncHandler(async (req, res) => {
-  const auth = extractAuthPayload(req);
+  const auth = await extractAuthPayload(req);
   if (auth.error) {
     return res.status(auth.error.status).json({ message: auth.error.message });
   }
@@ -853,7 +914,7 @@ router.post('/delete-account', asyncHandler(async (req, res) => {
 }));
 
 router.post('/cancel-deletion', asyncHandler(async (req, res) => {
-  const auth = extractAuthPayload(req);
+  const auth = await extractAuthPayload(req);
   if (auth.error) {
     return res.status(auth.error.status).json({ message: auth.error.message });
   }
