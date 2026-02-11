@@ -371,7 +371,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
   // In dev, always return a reset URL (even if user doesn't exist) to avoid account enumeration
   // while still letting developers test the reset flow without SMTP.
   const devToken = `reset-dev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const devResetUrl = `${base}/forgot-password?token=${encodeURIComponent(user?.resetToken || devToken)}`;
+  const devResetUrl = `${base}/reset-password?token=${encodeURIComponent(user?.resetToken || devToken)}`;
 
   if (user) {
     user.resetToken = `reset-${Date.now()}`;
@@ -379,7 +379,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
     try { await persistUserToDb(user); } catch (_) {}
     // send reset email (non-blocking)
     try {
-      const resetUrl = `${base}/forgot-password?token=${encodeURIComponent(user.resetToken)}`;
+      const resetUrl = `${base}/reset-password?token=${encodeURIComponent(user.resetToken)}`;
       const html = `<p>Hi ${user.displayName || ''},</p><p>We received a request to reset your password. Click the link below to reset it (valid for 20 minutes):</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>If you didn't request this, ignore this message.</p>`;
       sendMail({ to: user.email, subject: 'Reset your Zoktu password', html }).catch((e) => console.warn('⚠️ reset-email send failed', e?.message || e));
     } catch (e) {
@@ -390,9 +390,52 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
   const response = { message: 'If an account exists with that email, a reset link has been sent.' };
   if (env.emailDevMode && env.nodeEnv !== 'production') {
     // Always include a URL in dev so frontend can test the flow without SMTP.
-    response.devResetUrl = user ? `${base}/forgot-password?token=${encodeURIComponent(user.resetToken)}` : devResetUrl;
+    response.devResetUrl = user ? `${base}/reset-password?token=${encodeURIComponent(user.resetToken)}` : devResetUrl;
   }
   res.json(response);
+}));
+
+router.post('/reset-password', asyncHandler(async (req, res) => {
+  const { token, newPassword } = req.body || {};
+
+  if (!token || !String(token).trim()) {
+    return res.status(400).json({ message: 'Reset token is required' });
+  }
+
+  if (!newPassword || String(newPassword).length < 6) {
+    return res.status(400).json({ message: 'New password must be at least 6 characters' });
+  }
+
+  const cleanToken = String(token).trim();
+  const userDoc = await User.findOne({ resetToken: cleanToken }).exec().catch(() => null);
+  if (!userDoc) {
+    return res.status(400).json({ message: 'Invalid or expired reset token' });
+  }
+
+  const expires = Number(userDoc.resetTokenExpires || 0);
+  if (!expires || Date.now() > expires) {
+    return res.status(400).json({ message: 'Reset token expired. Please request a new one.' });
+  }
+
+  const nextHash = await bcrypt.hash(String(newPassword), 10);
+  userDoc.password = nextHash;
+  userDoc.resetToken = undefined;
+  userDoc.resetTokenExpires = undefined;
+  await userDoc.save();
+
+  // Keep in-memory cache in sync.
+  try {
+    const emailKey = userDoc.email ? String(userDoc.email) : null;
+    if (emailKey && users.has(emailKey)) {
+      const cached = users.get(emailKey);
+      cached.password = nextHash;
+      delete cached.resetToken;
+      delete cached.resetTokenExpires;
+      users.set(emailKey, cached);
+    }
+  } catch (_) {}
+
+  res.json({ message: 'Password updated successfully' });
 }));
 
 router.post('/login', asyncHandler(async (req, res) => {
