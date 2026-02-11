@@ -289,15 +289,37 @@ router.post('/signup', asyncHandler(async (req, res) => {
 
     try {
       convertingGuest.lastIp = getRequestIp(req);
-      const saved = await persistUserToDb(convertingGuest);
-      users.set(email, convertingGuest);
-      users.set(convertingGuest.id, convertingGuest);
-      const token = signToken(convertingGuest);
-      const sessionId = await createSessionForUser(convertingGuest.id, req);
+      const guestLookupId = String(convertingGuest.guestId || convertingGuest.id || '').trim();
+      const { _id: ignoreId, id: ignoreMemoryId, ...persistableGuest } = convertingGuest;
+      let saved = null;
+
+      if (guestLookupId) {
+        saved = await User.findOneAndUpdate(
+          { guestId: guestLookupId },
+          { $set: { ...persistableGuest, guestId: guestLookupId } },
+          { upsert: true, new: true }
+        ).lean().exec();
+      } else if (convertingGuest._id) {
+        saved = await User.findByIdAndUpdate(
+          convertingGuest._id,
+          { $set: persistableGuest },
+          { new: true }
+        ).lean().exec();
+      } else {
+        saved = await persistUserToDb(convertingGuest);
+      }
+
+      const merged = saved ? upsertUserInMemory({ ...saved, id: String(saved.guestId || saved._id) }) : convertingGuest;
+      if (merged?.displayName) guestUsernames.delete(String(merged.displayName).toLowerCase());
+      if (merged?.email) users.set(merged.email, merged);
+      if (merged?.id) users.set(String(merged.id), merged);
+      if (merged?.guestId) users.set(String(merged.guestId), merged);
+      const token = signToken(merged || convertingGuest);
+      const sessionId = await createSessionForUser((merged || convertingGuest).id, req);
 
       // Fire-and-forget verification email
       try { await issueEmailVerification({ email, displayName: convertingGuest.displayName || convertingGuest.name || email }); } catch (_) {}
-      return res.json({ user: sanitizeUser(convertingGuest), token, sessionId });
+      return res.json({ user: sanitizeUser(merged || convertingGuest), token, sessionId });
     } catch (e) {
       console.warn('⚠️ Failed to persist converted guest to registered user', e?.message || e);
       // fallthrough to in-memory registration
