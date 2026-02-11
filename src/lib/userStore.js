@@ -4,6 +4,28 @@ import User from '../models/User.js';
 export const users = new Map(); // keyed by email (for registered accounts)
 export const guestUsernames = new Map();
 
+export function updateUserPresenceInMemory(userId, isOnline) {
+  const id = String(userId || '').trim();
+  if (!id) return;
+
+  const nextIsOnline = Boolean(isOnline);
+  const nextLastSeen = nextIsOnline ? undefined : new Date();
+
+  for (const [key, value] of users.entries()) {
+    if (!value) continue;
+    const entryId = value.id || value._id || '';
+    const entryGuestId = value.guestId || '';
+    if (String(entryId) !== id && String(entryGuestId) !== id) continue;
+
+    const updated = {
+      ...value,
+      isOnline: nextIsOnline,
+      ...(nextLastSeen ? { lastSeen: nextLastSeen } : {})
+    };
+    users.set(key, updated);
+  }
+}
+
 export function upsertUserInMemory(docOrUser) {
   if (!docOrUser) return null;
   const id = String(docOrUser._id || docOrUser.id || '').trim();

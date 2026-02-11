@@ -9,6 +9,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { createServer } from 'http';
 import { Server as IOServer } from 'socket.io';
 import { messages } from './routes/messages.js';
+import { updateUserPresenceInMemory } from './lib/userStore.js';
 import Message from './models/Message.js';
 import Room from './models/Room.js';
 import User from './models/User.js';
@@ -96,6 +97,7 @@ const markUserPresence = async (uid, isOnline) => {
       },
       { new: false }
     ).lean();
+    updateUserPresenceInMemory(id, isOnline);
   } catch (e) {
     // best-effort; ignore
   }
