@@ -7,12 +7,10 @@ import { upsertUserInMemory } from '../lib/userStore.js';
 
 const router = Router();
 
-const isRegisteredAndVerified = (userDoc) => {
+const isRegisteredNonGuest = (userDoc) => {
   if (!userDoc) return false;
   const userType = String(userDoc.userType || '').toLowerCase();
-  const isRegistered = userType && userType !== 'guest';
-  const isVerified = Boolean(userDoc.emailVerified === true);
-  return isRegistered && isVerified;
+  return Boolean(userType && userType !== 'guest');
 };
 
 const getUserDocForAuth = async (payload) => {
@@ -114,10 +112,10 @@ router.get('/requests', requireAuth, asyncHandler(async (req, res) => {
 // Send a friend request (payload sender is taken from auth; accepts multiple body key names)
 router.post('/requests', requireAuth, asyncHandler(async (req, res) => {
   const payload = req.user;
-  // Only registered + verified users can send friend requests
+  // Only registered (non-guest) users can send friend requests
   const meDoc = await getUserDocForAuth(payload);
-  if (!isRegisteredAndVerified(meDoc)) {
-    return res.status(403).json({ message: 'Only registered and verified users can send friend requests' });
+  if (!isRegisteredNonGuest(meDoc)) {
+    return res.status(403).json({ message: 'Guests cannot send friend requests' });
   }
 
   const fromId = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
@@ -154,10 +152,10 @@ router.post('/requests', requireAuth, asyncHandler(async (req, res) => {
 const acceptRequest = async (req, res) => {
   const payload = req.user;
 
-  // Only registered + verified users can accept friend requests
+  // Only registered (non-guest) users can accept friend requests
   const meDoc = await getUserDocForAuth(payload);
-  if (!isRegisteredAndVerified(meDoc)) {
-    return res.status(403).json({ message: 'Only registered and verified users can accept friend requests' });
+  if (!isRegisteredNonGuest(meDoc)) {
+    return res.status(403).json({ message: 'Guests cannot accept friend requests' });
   }
 
   const expanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
