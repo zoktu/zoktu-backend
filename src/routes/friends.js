@@ -13,6 +13,12 @@ const isRegisteredNonGuest = (userDoc) => {
   return Boolean(userType && userType !== 'guest');
 };
 
+const isNonGuestFromAuth = (payload, userDoc) => {
+  if (isRegisteredNonGuest(userDoc)) return true;
+  const payloadType = String(payload?.userType || '').toLowerCase();
+  return Boolean(payloadType && payloadType !== 'guest');
+};
+
 const getUserDocForAuth = async (payload) => {
   if (!payload) return null;
   const ors = [];
@@ -114,7 +120,7 @@ router.post('/requests', requireAuth, asyncHandler(async (req, res) => {
   const payload = req.user;
   // Only registered (non-guest) users can send friend requests
   const meDoc = await getUserDocForAuth(payload);
-  if (!isRegisteredNonGuest(meDoc)) {
+  if (!isNonGuestFromAuth(payload, meDoc)) {
     return res.status(403).json({ message: 'Guests cannot send friend requests' });
   }
 
@@ -154,7 +160,7 @@ const acceptRequest = async (req, res) => {
 
   // Only registered (non-guest) users can accept friend requests
   const meDoc = await getUserDocForAuth(payload);
-  if (!isRegisteredNonGuest(meDoc)) {
+  if (!isNonGuestFromAuth(payload, meDoc)) {
     return res.status(403).json({ message: 'Guests cannot accept friend requests' });
   }
 
