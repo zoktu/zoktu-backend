@@ -8,7 +8,8 @@ const smtpConfig = {
   secure: (process.env.SMTP_SECURE || String(env.smtpSecure || false)) === 'true',
   user: process.env.SMTP_USER || env.smtpUser,
   pass: process.env.SMTP_PASS || env.smtpPass,
-  from: process.env.EMAIL_FROM || env.emailFrom
+  from: process.env.EMAIL_FROM || env.emailFrom,
+  timeoutMs: Number(process.env.SMTP_TIMEOUT_MS || 10000)
 };
 
 let transporter = null;
@@ -21,7 +22,10 @@ if (smtpConfig.enabled) {
     auth: {
       user: smtpConfig.user,
       pass: smtpConfig.pass
-    }
+    },
+    connectionTimeout: smtpConfig.timeoutMs,
+    greetingTimeout: smtpConfig.timeoutMs,
+    socketTimeout: smtpConfig.timeoutMs
   });
 
   transporter.verify().then(() => {

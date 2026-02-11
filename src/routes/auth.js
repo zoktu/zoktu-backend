@@ -318,7 +318,7 @@ router.post('/signup', asyncHandler(async (req, res) => {
       const sessionId = await createSessionForUser((merged || convertingGuest).id, req);
 
       // Fire-and-forget verification email
-      try { await issueEmailVerification({ email, displayName: convertingGuest.displayName || convertingGuest.name || email }); } catch (_) {}
+      issueEmailVerification({ email, displayName: convertingGuest.displayName || convertingGuest.name || email }).catch(() => {});
       return res.json({ user: sanitizeUser(merged || convertingGuest), token, sessionId });
     } catch (e) {
       console.warn('⚠️ Failed to persist converted guest to registered user', e?.message || e);
@@ -349,7 +349,7 @@ router.post('/signup', asyncHandler(async (req, res) => {
   const sessionId = await createSessionForUser(user.id, req);
 
   // Fire-and-forget verification email
-  try { await issueEmailVerification({ email, displayName: user.displayName || user.name || email }); } catch (_) {}
+  issueEmailVerification({ email, displayName: user.displayName || user.name || email }).catch(() => {});
   res.json({ user: sanitizeUser(user), token, sessionId });
 }));
 
@@ -626,11 +626,7 @@ router.post('/resend-verification', asyncHandler(async (req, res) => {
   const displayName = record?.displayName || record?.name || cleanEmail;
 
   // Fire-and-forget, but don't leak whether the email exists.
-  try {
-    await issueEmailVerification({ email: cleanEmail, displayName });
-  } catch (e) {
-    // ignore
-  }
+  issueEmailVerification({ email: cleanEmail, displayName }).catch(() => {});
 
   res.json({ message: 'If an account exists, a verification email has been sent.' });
 }));
