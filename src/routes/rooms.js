@@ -406,17 +406,26 @@ router.post('/', asyncHandler(async (req, res) => {
   }
 
   const id = `room-${Date.now()}`;
-  const ownerId = payload.id;
+  const resolvedOwnerId = userRecord?._id || userRecord?.id || payload?.id || '';
+  const ownerId = String(resolvedOwnerId || '').trim();
+  const rawParticipants = Array.isArray(req.body.participants) ? req.body.participants : [];
+  const rawMembers = Array.isArray(req.body.members) ? req.body.members : [];
+  const rawAdmins = Array.isArray(req.body.admins) ? req.body.admins : [];
+  const participants = Array.from(new Set([ownerId, ...rawParticipants.map(String)])).filter(Boolean);
+  const members = Array.from(new Set([ownerId, ...rawMembers.map(String)])).filter(Boolean);
+  const admins = Array.from(new Set([ownerId, ...rawAdmins.map(String)])).filter(Boolean);
   const room = {
     id,
     ...req.body,
     owner: ownerId,
     createdBy: ownerId,
-    participants: Array.from(new Set([ownerId, ...(req.body.participants || [])]))
+    participants,
+    members,
+    admins
   };
   // persist to DB
   try {
-    const doc = new Room({ _id: id, name: room.name || '', description: room.description || '', type: room.type || 'public', owner: ownerId, createdBy: ownerId, participants: room.participants, members: room.members || room.participants, settings: room.settings || {}, category: room.category || '' });
+    const doc = new Room({ _id: id, name: room.name || '', description: room.description || '', type: room.type || 'public', owner: ownerId, createdBy: ownerId, participants: room.participants, members: room.members || room.participants, admins: room.admins || [], settings: room.settings || {}, category: room.category || '' });
     await doc.save();
   } catch (e) {
     // ignore persistence errors but keep in-memory
