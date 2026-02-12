@@ -9,7 +9,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { createServer } from 'http';
 import { Server as IOServer } from 'socket.io';
 import { messages } from './routes/messages.js';
-import { updateUserPresenceInMemory } from './lib/userStore.js';
+import { updateUserPresenceInMemory, upsertUserInMemory } from './lib/userStore.js';
 import Message from './models/Message.js';
 import Room from './models/Room.js';
 import User from './models/User.js';
@@ -307,6 +307,48 @@ const start = async () => {
     console.log('✅ Seeded users from DB');
   } catch (e) {
     console.warn('⚠️ Could not seed users from DB', e.message || e);
+  }
+  // Ensure bot exists and is added to all public/private rooms
+  try {
+    const botId = env.botId || 'bot-baka';
+    const botName = env.botName || 'Baka';
+    const botEnabled = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
+    if (botEnabled) {
+      const doc = await User.findOneAndUpdate(
+        { guestId: String(botId) },
+        {
+          $setOnInsert: {
+            guestId: String(botId),
+            userType: 'guest',
+            displayName: String(botName),
+            name: String(botName),
+            username: String(botName)
+          },
+          $set: {
+            displayName: String(botName),
+            name: String(botName),
+            username: String(botName),
+            isOnline: true
+          }
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      ).lean().exec();
+      if (doc) {
+        upsertUserInMemory({ ...doc, id: String(doc.guestId || doc._id) });
+      }
+
+      await Room.updateMany(
+        {
+          $or: [
+            { type: 'public' },
+            { type: 'private', category: { $ne: 'dm' } }
+          ]
+        },
+        { $addToSet: { participants: String(botId), members: String(botId) } }
+      ).exec();
+    }
+  } catch (e) {
+    console.warn('⚠️ Could not bootstrap bot', e.message || e);
   }
   httpServer.listen(env.port, () => {
     console.log(`🚀 Backend running on http://localhost:${env.port}`);
