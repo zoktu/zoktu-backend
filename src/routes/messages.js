@@ -7,6 +7,7 @@ import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import Room from '../models/Room.js';
 import User from '../models/User.js';
+import Notification from '../models/Notification.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
 
 const router = Router();
@@ -210,6 +211,120 @@ const getAuthPayload = (req) => {
 };
 
 const looksLikeObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
+
+const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const extractMentions = (text) => {
+  const raw = String(text || '');
+  const matches = raw.match(/@([a-zA-Z0-9_.-]{2,32})/g) || [];
+  const tokens = matches.map(m => m.slice(1).trim()).filter(Boolean);
+  return Array.from(new Set(tokens.map(t => t.toLowerCase()))).slice(0, 8);
+};
+
+const buildParticipantFilters = (roomDoc) => {
+  const ids = (roomDoc?.participants || roomDoc?.members || []).map(String).filter(Boolean);
+  const objectIds = ids.filter(looksLikeObjectId);
+  const guestIds = ids.filter((id) => !looksLikeObjectId(id));
+  return { objectIds, guestIds };
+};
+
+const findMentionTargets = async (roomDoc, mentionTokens) => {
+  if (!roomDoc || !mentionTokens?.length) return [];
+  const { objectIds, guestIds } = buildParticipantFilters(roomDoc);
+  if (!objectIds.length && !guestIds.length) return [];
+
+  const regexes = mentionTokens.map((t) => new RegExp(`^${escapeRegex(t)}$`, 'i'));
+  const query = {
+    $and: [
+      {
+        $or: [
+          ...(objectIds.length ? [{ _id: { $in: objectIds } }] : []),
+          ...(guestIds.length ? [{ guestId: { $in: guestIds } }] : [])
+        ]
+      },
+      {
+        $or: [
+          { displayName: { $in: regexes } },
+          { username: { $in: regexes } },
+          { name: { $in: regexes } }
+        ]
+      }
+    ]
+  };
+
+  const docs = await User.find(query).select('_id guestId displayName username name').lean().exec();
+  return (docs || []).map((d) => ({
+    id: d?._id ? String(d._id) : (d?.guestId ? String(d.guestId) : null),
+    name: d?.displayName || d?.username || d?.name || 'User'
+  })).filter((d) => d.id);
+};
+
+const createNotificationsForMessage = async ({ roomDoc, doc, senderIdEffective, senderName, content, replyTo, auth }) => {
+  try {
+    const senderIds = new Set((auth?.ids || []).map(String));
+    senderIds.add(String(senderIdEffective));
+
+    const targets = new Map();
+
+    if (isDmRoomDoc(roomDoc)) {
+      const participants = (roomDoc?.participants || roomDoc?.members || []).map(String).filter(Boolean);
+      const other = participants.find((p) => !senderIds.has(String(p)));
+      if (other) {
+        targets.set(String(other), { type: 'dm' });
+      }
+    } else {
+      const mentionTokens = extractMentions(content);
+      if (mentionTokens.length) {
+        const mentioned = await findMentionTargets(roomDoc, mentionTokens);
+        for (const m of mentioned) {
+          if (!m?.id) continue;
+          if (senderIds.has(String(m.id))) continue;
+          targets.set(String(m.id), { type: 'mention' });
+        }
+      }
+
+      if (replyTo) {
+        const { doc: replyDoc } = await findMessageDocById(String(replyTo));
+        const replyTargetId = replyDoc?.senderId ? String(replyDoc.senderId) : null;
+        if (replyTargetId && !senderIds.has(replyTargetId)) {
+          targets.set(replyTargetId, { type: 'reply' });
+        }
+      }
+    }
+
+    if (!targets.size) return;
+
+    const trimmed = String(content || '').trim();
+    const preview = trimmed ? trimmed.slice(0, 140) : 'New message';
+
+    const writes = [];
+    for (const [targetId, info] of targets.entries()) {
+      const type = info?.type || 'system';
+      const title = type === 'dm'
+        ? `New DM from ${senderName || 'User'}`
+        : type === 'mention'
+          ? `${senderName || 'User'} mentioned you`
+          : `${senderName || 'User'} replied to you`;
+
+      writes.push({
+        userId: String(targetId),
+        actorId: String(senderIdEffective),
+        roomId: String(doc.roomId),
+        messageId: String(doc._id),
+        type,
+        title,
+        message: preview,
+        read: false
+      });
+    }
+
+    if (writes.length) {
+      await Notification.insertMany(writes);
+    }
+  } catch (e) {
+    // best-effort
+  }
+};
 
 const normalizeReceiptIds = (auth) => {
   try {
@@ -782,6 +897,16 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     });
     messages.set(roomId, list);
   } catch (e) {}
+
+  await createNotificationsForMessage({
+    roomDoc,
+    doc,
+    senderIdEffective,
+    senderName: req.body?.senderName || '',
+    content,
+    replyTo,
+    auth
+  });
   if (shouldBotReply(roomDoc, senderIdEffective, content, req.body?.type)) {
     botLastReplyByRoom.set(String(roomId), Date.now());
     setTimeout(() => {

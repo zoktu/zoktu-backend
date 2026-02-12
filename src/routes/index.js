@@ -10,6 +10,7 @@ import debugRoutes from './debug.js';
 import uploadsRoutes from './uploads.js';
 import reportsRoutes from './reports.js';
 import sessionsRoutes from './sessions.js';
+import notificationsRoutes from './notifications.js';
 
 const router = Router();
 
@@ -24,5 +25,6 @@ router.use('/debug', debugRoutes);
 router.use('/uploads', uploadsRoutes);
 router.use('/reports', reportsRoutes);
 router.use('/sessions', sessionsRoutes);
+router.use('/notifications', notificationsRoutes);
 
 export default router;
