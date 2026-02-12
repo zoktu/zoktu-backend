@@ -22,7 +22,7 @@ const mutedUsers = new Map(); // userId -> muteUntil timestamp
 const MESSAGE_WINDOW_MS = 15000; // 15s window
 const MESSAGE_LIMIT = 8; // more than this in window => mute
 const MUTE_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_WORDS = 200; // maximum words allowed per message
+const MAX_WORDS = 300; // maximum words allowed per message
 
 const BOT_ID = env.botId || 'bot-baka';
 const BOT_NAME = env.botName || 'Baka';
@@ -211,6 +211,29 @@ const getAuthPayload = (req) => {
 };
 
 const looksLikeObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
+
+const pruneRoomMessages = async ({ roomDoc, roomId, Model }) => {
+  try {
+    if (!roomDoc) return;
+    if (isDmRoomDoc(roomDoc)) return;
+    if (String(roomDoc.category || '') === 'random') return;
+
+    const idsToDelete = await Model.find({ roomId: String(roomId) })
+      .sort({ createdAt: -1 })
+      .skip(100)
+      .limit(500)
+      .select('_id')
+      .lean()
+      .exec();
+
+    const ids = (idsToDelete || []).map((d) => d?._id).filter(Boolean);
+    if (!ids.length) return;
+
+    await Model.deleteMany({ _id: { $in: ids } }).exec();
+  } catch (e) {
+    // best-effort
+  }
+};
 
 const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -907,6 +930,8 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     replyTo,
     auth
   });
+
+  await pruneRoomMessages({ roomDoc, roomId, Model });
   if (shouldBotReply(roomDoc, senderIdEffective, content, req.body?.type)) {
     botLastReplyByRoom.set(String(roomId), Date.now());
     setTimeout(() => {
