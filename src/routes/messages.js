@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import fetch from 'node-fetch';
 import { asyncHandler } from '../utils/asyncHandler.js';
+import { upsertUserInMemory } from '../lib/userStore.js';
 import { getModelForRoom, RoomMessage, DMMessage, RandomMessage } from '../models/Message.js';
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
@@ -31,6 +32,37 @@ const BOT_REPLY_COOLDOWN_MS = Number.isFinite(Number(env.botReplyCooldownMs))
 const BOT_ENABLED = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
 const botLastReplyByRoom = new Map();
 const BOT_UNSAFE_PATTERN = /(kill yourself|self-harm|suicide|rape|terrorist|nazi)/i;
+
+const ensureBotUser = async () => {
+  if (!BOT_ENABLED) return null;
+  try {
+    const existing = await User.findOne({ guestId: String(BOT_ID) }).lean().catch(() => null);
+    if (existing) return upsertUserInMemory({ ...existing, id: String(existing.guestId || existing._id) });
+    const doc = await User.findOneAndUpdate(
+      { guestId: String(BOT_ID) },
+      {
+        $setOnInsert: {
+          guestId: String(BOT_ID),
+          userType: 'guest',
+          displayName: String(BOT_NAME),
+          name: String(BOT_NAME),
+          username: String(BOT_NAME)
+        },
+        $set: {
+          displayName: String(BOT_NAME),
+          name: String(BOT_NAME),
+          username: String(BOT_NAME),
+          isOnline: true
+        }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean().exec();
+    if (!doc) return null;
+    return upsertUserInMemory({ ...doc, id: String(doc.guestId || doc._id) });
+  } catch (e) {
+    return null;
+  }
+};
 
 const shouldBotReply = (roomDoc, senderId, content, msgType) => {
   if (!BOT_ENABLED) return false;
@@ -88,6 +120,15 @@ const fetchGeminiReply = async ({ promptText }) => {
 
 const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
   try {
+    await ensureBotUser();
+    try {
+      await Room.findByIdAndUpdate(
+        String(roomId),
+        { $addToSet: { participants: String(BOT_ID), members: String(BOT_ID) }, $set: { updatedAt: new Date() } },
+        { upsert: false }
+      ).catch(() => null);
+    } catch (e) {}
+
     const promptText = [
       `You are ${BOT_NAME}, a friendly female chat bot in a room chat.`,
       'Reply in Hinglish or English, keep it short (1-2 lines), friendly, and safe.',

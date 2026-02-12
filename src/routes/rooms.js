@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import Room from '../models/Room.js';
-import { users } from '../lib/userStore.js';
+import { users, upsertUserInMemory } from '../lib/userStore.js';
 import User from '../models/User.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
 
@@ -11,6 +11,41 @@ const router = Router();
 const rooms = new Map();
 // Simple in-memory waiting queue for random chat pairing
 const waitingQueue = [];
+
+const BOT_ID = env.botId || 'bot-baka';
+const BOT_NAME = env.botName || 'Baka';
+const BOT_ENABLED = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
+
+const ensureBotUser = async () => {
+  if (!BOT_ENABLED) return null;
+  try {
+    const existing = await User.findOne({ guestId: String(BOT_ID) }).lean().catch(() => null);
+    if (existing) return upsertUserInMemory({ ...existing, id: String(existing.guestId || existing._id) });
+    const doc = await User.findOneAndUpdate(
+      { guestId: String(BOT_ID) },
+      {
+        $setOnInsert: {
+          guestId: String(BOT_ID),
+          userType: 'guest',
+          displayName: String(BOT_NAME),
+          name: String(BOT_NAME),
+          username: String(BOT_NAME)
+        },
+        $set: {
+          displayName: String(BOT_NAME),
+          name: String(BOT_NAME),
+          username: String(BOT_NAME),
+          isOnline: true
+        }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean().exec();
+    if (!doc) return null;
+    return upsertUserInMemory({ ...doc, id: String(doc.guestId || doc._id) });
+  } catch (e) {
+    return null;
+  }
+};
 
 const uniqStrings = (arr) => Array.from(new Set((arr || []).filter(Boolean).map((v) => String(v))));
 
@@ -415,6 +450,12 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
   const roomMem = rooms.get(id) || null;
   if (!roomDoc && !roomMem) return res.status(404).json({ message: 'Room not found' });
 
+  const roomForBot = roomDoc || roomMem;
+  const shouldAddBot = BOT_ENABLED && roomForBot && !isDmRoomDoc(roomForBot) && ['public', 'private'].includes(String(roomForBot.type || ''));
+  if (shouldAddBot) {
+    await ensureBotUser();
+  }
+
   // enforce bans using DB doc if present
   try {
     const doc = roomDoc;
@@ -440,9 +481,12 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
   // Update DB if present
   if (roomDoc) {
     try {
+      const addParticipants = shouldAddBot
+        ? { $each: [String(userId), String(BOT_ID)] }
+        : String(userId);
       await Room.findByIdAndUpdate(
         id,
-        { $addToSet: { participants: String(userId), members: String(userId) }, $set: { updatedAt: new Date() } },
+        { $addToSet: { participants: addParticipants, members: addParticipants }, $set: { updatedAt: new Date() } },
         { upsert: false }
       );
       const fresh = await Room.findById(id).lean().catch(() => null);
@@ -460,6 +504,10 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
   const next = roomMem || { id, ...(roomDoc || {}) };
   next.participants = [...new Set([...(next.participants || []), String(userId)])];
   next.members = [...new Set([...(next.members || []), String(userId)])];
+  if (shouldAddBot) {
+    next.participants = [...new Set([...(next.participants || []), String(BOT_ID)])];
+    next.members = [...new Set([...(next.members || []), String(BOT_ID)])];
+  }
   rooms.set(id, next);
   res.json(next);
 }));
