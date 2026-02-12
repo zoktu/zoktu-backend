@@ -22,7 +22,7 @@ const mutedUsers = new Map(); // userId -> muteUntil timestamp
 const MESSAGE_WINDOW_MS = 15000; // 15s window
 const MESSAGE_LIMIT = 8; // more than this in window => mute
 const MUTE_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_WORDS = 300; // maximum words allowed per message
+const MAX_WORDS = 200; // maximum words allowed per message
 
 const BOT_ID = env.botId || 'bot-baka';
 const BOT_NAME = env.botName || 'Baka';
