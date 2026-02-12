@@ -72,6 +72,10 @@ export async function persistUserToDb(user) {
 
   // Keep profile photo fields consistent across the codebase.
   // Some UI writes `photoURL`, others write `avatar`.
+  if (data.photoURL === null || data.avatar === null) {
+    data.photoURL = null;
+    data.avatar = null;
+  }
   if (!data.avatar && data.photoURL) data.avatar = data.photoURL;
   if (!data.photoURL && data.avatar) data.photoURL = data.avatar;
 

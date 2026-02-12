@@ -381,6 +381,17 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   const safeBody = { ...(req.body || {}) };
   delete safeBody.lastUsernameChange;
 
+  const wantsClearPhoto =
+    Object.prototype.hasOwnProperty.call(safeBody, 'photoURL') &&
+    (safeBody.photoURL === null || String(safeBody.photoURL).trim() === '');
+  const wantsClearAvatar =
+    Object.prototype.hasOwnProperty.call(safeBody, 'avatar') &&
+    (safeBody.avatar === null || String(safeBody.avatar).trim() === '');
+  if (wantsClearPhoto || wantsClearAvatar) {
+    safeBody.photoURL = null;
+    safeBody.avatar = null;
+  }
+
   // DOB rules: allow setting only once; age must be 15–99.
   if (Object.prototype.hasOwnProperty.call(safeBody, 'dob')) {
     const incomingDobRaw = safeBody.dob;
