@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import fetch from 'node-fetch';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { getModelForRoom, RoomMessage, DMMessage, RandomMessage } from '../models/Message.js';
 import jwt from 'jsonwebtoken';
@@ -20,6 +21,113 @@ const MESSAGE_WINDOW_MS = 15000; // 15s window
 const MESSAGE_LIMIT = 8; // more than this in window => mute
 const MUTE_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_WORDS = 200; // maximum words allowed per message
+
+const BOT_ID = env.botId || 'bot-baka';
+const BOT_NAME = env.botName || 'Baka';
+const BOT_MODEL = env.geminiModel || 'gemini-1.5-flash';
+const BOT_REPLY_COOLDOWN_MS = Number.isFinite(Number(env.botReplyCooldownMs))
+  ? Number(env.botReplyCooldownMs)
+  : 6000;
+const BOT_ENABLED = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
+const botLastReplyByRoom = new Map();
+const BOT_UNSAFE_PATTERN = /(kill yourself|self-harm|suicide|rape|terrorist|nazi)/i;
+
+const shouldBotReply = (roomDoc, senderId, content, msgType) => {
+  if (!BOT_ENABLED) return false;
+  if (!roomDoc) return false;
+  if (isDmRoomDoc(roomDoc)) return false;
+  if (!['public', 'private'].includes(String(roomDoc.type || ''))) return false;
+  if (String(senderId || '') === String(BOT_ID)) return false;
+  const text = String(content || '').trim();
+  if (!text) return false;
+  if (String(msgType || 'text') !== 'text') return false;
+  const last = botLastReplyByRoom.get(String(roomDoc._id)) || 0;
+  if (Date.now() - last < BOT_REPLY_COOLDOWN_MS) return false;
+  return true;
+};
+
+const sanitizeBotText = (text) => {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return null;
+  if (BOT_UNSAFE_PATTERN.test(raw)) return null;
+  return raw.length > 600 ? raw.slice(0, 600).trim() : raw;
+};
+
+const fetchGeminiReply = async ({ promptText }) => {
+  if (!env.geminiApiKey) return null;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(BOT_MODEL)}:generateContent?key=${env.geminiApiKey}`;
+  const body = {
+    contents: [{
+      role: 'user',
+      parts: [{ text: promptText }]
+    }],
+    generationConfig: {
+      temperature: 0.7,
+      topP: 0.9,
+      maxOutputTokens: 160
+    },
+    safetySettings: [
+      { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+      { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+      { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+      { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' }
+    ]
+  };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    return null;
+  }
+  const data = await res.json().catch(() => null);
+  const text = data?.candidates?.[0]?.content?.parts?.map((p) => p?.text).filter(Boolean).join(' ');
+  return sanitizeBotText(text);
+};
+
+const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
+  try {
+    const promptText = [
+      `You are ${BOT_NAME}, a friendly female chat bot in a room chat.`,
+      'Reply in Hinglish or English, keep it short (1-2 lines), friendly, and safe.',
+      'Do not mention that you are an AI model or any policies.',
+      `User (${userName || 'User'}): ${userMessage}`
+    ].join(' ');
+
+    const reply = await fetchGeminiReply({ promptText });
+    if (!reply) return;
+
+    const Model = getModelForRoom(roomDoc);
+    const doc = new Model({
+      roomId,
+      senderId: String(BOT_ID),
+      senderName: String(BOT_NAME),
+      content: reply,
+      type: 'text'
+    });
+    await doc.save();
+
+    try {
+      const list = messages.get(roomId) || [];
+      list.push({
+        id: doc._id.toString(),
+        roomId,
+        senderId: doc.senderId,
+        senderName: doc.senderName,
+        content: doc.content,
+        type: doc.type,
+        attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
+        timestamp: doc.createdAt.toISOString()
+      });
+      messages.set(roomId, list);
+    } catch (e) {}
+
+    botLastReplyByRoom.set(String(roomId), Date.now());
+  } catch (e) {
+    // best-effort
+  }
+};
 
 
 const isUserMuted = (userId) => {
@@ -633,6 +741,17 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     });
     messages.set(roomId, list);
   } catch (e) {}
+  if (shouldBotReply(roomDoc, senderIdEffective, content, req.body?.type)) {
+    botLastReplyByRoom.set(String(roomId), Date.now());
+    setTimeout(() => {
+      postBotReply({
+        roomDoc,
+        roomId,
+        userMessage: String(content || '').trim(),
+        userName: req.body?.senderName || ''
+      });
+    }, 800);
+  }
   res.json({
     id: doc._id.toString(),
     roomId,

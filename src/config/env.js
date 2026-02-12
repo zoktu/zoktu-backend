@@ -21,7 +21,13 @@ export const env = {
   jwtSecret: process.env.JWT_SECRET || 'change-me',
   clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
   // Prefer explicit backend origin for building API links (e.g., email verification)
-  apiOrigin: process.env.API_ORIGIN || process.env.BACKEND_ORIGIN || ''
+  apiOrigin: process.env.API_ORIGIN || process.env.BACKEND_ORIGIN || '',
+  geminiApiKey: process.env.GEMINI_API_KEY || '',
+  geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+  botName: process.env.BOT_NAME || 'Baka',
+  botId: process.env.BOT_ID || 'bot-baka',
+  botEnabled: process.env.BOT_ENABLED || '',
+  botReplyCooldownMs: process.env.BOT_REPLY_COOLDOWN_MS || ''
 };
 
 // Dev helpers (never enable in production)
