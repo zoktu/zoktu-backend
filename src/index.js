@@ -13,14 +13,22 @@ import { updateUserPresenceInMemory, upsertUserInMemory } from './lib/userStore.
 import Message from './models/Message.js';
 import Room from './models/Room.js';
 import User from './models/User.js';
+import { createRateLimiter } from './middleware/rateLimit.js';
 
 const app = express();
+
+app.set('trust proxy', 1);
 
 app.use(cors({ origin: env.clientOrigin, credentials: true }));
 app.use(helmet());
 app.use(morgan('dev'));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+const apiLimiter = createRateLimiter({ windowMs: 60_000, max: 120, message: 'Too many requests' });
+const authLimiter = createRateLimiter({ windowMs: 10 * 60_000, max: 30, message: 'Too many auth attempts', keyPrefix: 'auth' });
+const messageLimiter = createRateLimiter({ windowMs: 10_000, max: 20, message: 'Too many messages', keyPrefix: 'message' });
+const uploadLimiter = createRateLimiter({ windowMs: 60_000, max: 20, message: 'Too many uploads', keyPrefix: 'upload' });
 
 app.get('/', (req, res) => {
   res.json({ 
@@ -30,6 +38,13 @@ app.get('/', (req, res) => {
   });
 });
 
+app.use('/api', apiLimiter);
+app.use('/api/auth', authLimiter);
+app.use('/api/uploads', uploadLimiter);
+app.use('/api/rooms/:roomId/messages', (req, res, next) => {
+  if (req.method === 'POST') return messageLimiter(req, res, next);
+  return next();
+});
 app.use('/api', routes);
 
 app.use((req, res) => {
