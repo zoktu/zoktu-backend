@@ -78,7 +78,7 @@ const ensureBotUser = async () => {
   }
 };
 
-const shouldBotReply = (roomDoc, senderId, content, msgType) => {
+const shouldBotReply = async (roomDoc, senderId, content, msgType, replyTo) => {
   if (!BOT_ENABLED) return false;
   if (!roomDoc) return false;
   if (isDmRoomDoc(roomDoc)) return false;
@@ -89,6 +89,27 @@ const shouldBotReply = (roomDoc, senderId, content, msgType) => {
   if (String(msgType || 'text') !== 'text') return false;
   const last = botLastReplyByRoom.get(String(roomDoc._id)) || 0;
   if (Date.now() - last < BOT_REPLY_COOLDOWN_MS) return false;
+  const mentionTokens = extractMentions(text).map((t) => String(t).toLowerCase());
+  const botNameToken = String(BOT_NAME || '').trim().toLowerCase();
+  const botIdToken = String(BOT_ID || '').trim().toLowerCase();
+  const mentioned = Boolean(
+    (botNameToken && mentionTokens.includes(botNameToken)) ||
+    (botIdToken && mentionTokens.includes(botIdToken))
+  );
+
+  let isReplyToBot = false;
+  if (replyTo) {
+    try {
+      const { doc: replyDoc } = await findMessageDocById(String(replyTo));
+      if (replyDoc && String(replyDoc.senderId) === String(BOT_ID)) {
+        isReplyToBot = true;
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  if (!mentioned && !isReplyToBot) return false;
   return true;
 };
 
@@ -948,7 +969,7 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   });
 
   await pruneRoomMessages({ roomDoc, roomId, Model });
-  if (shouldBotReply(roomDoc, senderIdEffective, content, req.body?.type)) {
+  if (await shouldBotReply(roomDoc, senderIdEffective, content, req.body?.type, replyTo)) {
     botLastReplyByRoom.set(String(roomId), Date.now());
     setTimeout(() => {
       postBotReply({
