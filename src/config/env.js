@@ -26,6 +26,7 @@ export const env = {
   geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
   botName: process.env.BOT_NAME || 'Baka',
   botId: process.env.BOT_ID || 'bot-baka',
+  botAvatar: process.env.BOT_AVATAR || process.env.BOT_AVATAR_URL || '',
   botEnabled: process.env.BOT_ENABLED || '',
   botReplyCooldownMs: process.env.BOT_REPLY_COOLDOWN_MS || ''
 };

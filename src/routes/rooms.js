@@ -14,6 +14,7 @@ const waitingQueue = [];
 
 const BOT_ID = env.botId || 'bot-baka';
 const BOT_NAME = env.botName || 'Baka';
+const BOT_AVATAR = env.botAvatar || '';
 const BOT_ENABLED = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
 
 const ensureBotUser = async () => {
@@ -29,13 +30,15 @@ const ensureBotUser = async () => {
           userType: 'guest',
           displayName: String(BOT_NAME),
           name: String(BOT_NAME),
-          username: String(BOT_NAME)
+          username: String(BOT_NAME),
+          ...(BOT_AVATAR ? { avatar: String(BOT_AVATAR), photoURL: String(BOT_AVATAR) } : {})
         },
         $set: {
           displayName: String(BOT_NAME),
           name: String(BOT_NAME),
           username: String(BOT_NAME),
-          isOnline: true
+          isOnline: true,
+          ...(BOT_AVATAR ? { avatar: String(BOT_AVATAR), photoURL: String(BOT_AVATAR) } : {})
         }
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -50,6 +53,7 @@ const ensureBotUser = async () => {
       name: String(BOT_NAME),
       username: String(BOT_NAME),
       userType: 'guest',
+      ...(BOT_AVATAR ? { avatar: String(BOT_AVATAR), photoURL: String(BOT_AVATAR) } : {}),
       isOnline: true
     };
     return upsertUserInMemory(fallback);

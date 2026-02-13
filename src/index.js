@@ -312,6 +312,7 @@ const start = async () => {
   try {
     const botId = env.botId || 'bot-baka';
     const botName = env.botName || 'Baka';
+    const botAvatar = env.botAvatar || '';
     const botEnabled = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
     if (botEnabled) {
       const doc = await User.findOneAndUpdate(
@@ -322,13 +323,15 @@ const start = async () => {
             userType: 'guest',
             displayName: String(botName),
             name: String(botName),
-            username: String(botName)
+            username: String(botName),
+            ...(botAvatar ? { avatar: String(botAvatar), photoURL: String(botAvatar) } : {})
           },
           $set: {
             displayName: String(botName),
             name: String(botName),
             username: String(botName),
-            isOnline: true
+            isOnline: true,
+            ...(botAvatar ? { avatar: String(botAvatar), photoURL: String(botAvatar) } : {})
           }
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }

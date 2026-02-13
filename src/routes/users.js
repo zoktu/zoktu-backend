@@ -150,6 +150,26 @@ router.get('/', asyncHandler(async (req, res) => {
 // Get user by id (uses in-memory map seeded from DB)
 router.get('/:id', asyncHandler(async (req, res) => {
   const viewerIds = await getViewerIdsFromReq(req);
+  const requestedId = String(req.params.id || '').trim();
+
+  if (requestedId && env.botId && requestedId === String(env.botId)) {
+    const botName = String(env.botName || 'Bot');
+    const botAvatar = String(env.botAvatar || '').trim();
+    const existing = users.get(requestedId) || null;
+    const botProfile = {
+      ...(existing || {}),
+      id: requestedId,
+      guestId: requestedId,
+      displayName: botName,
+      name: botName,
+      username: botName,
+      ...(botAvatar ? { avatar: botAvatar, photoURL: botAvatar } : {}),
+      userType: 'guest',
+      isOnline: true
+    };
+    users.set(requestedId, botProfile);
+    return res.json(filterUserForViewer({ viewerIds, user: botProfile }));
+  }
 
   let user = users.get(req.params.id) || null;
   if (user) return res.json(filterUserForViewer({ viewerIds, user }));
@@ -177,22 +197,6 @@ router.get('/:id', asyncHandler(async (req, res) => {
     }
   } catch (e) {
     // ignore
-  }
-
-  const requestedId = String(req.params.id || '').trim();
-  if (requestedId && env.botId && requestedId === String(env.botId)) {
-    const botName = String(env.botName || 'Bot');
-    const botFallback = {
-      id: requestedId,
-      guestId: requestedId,
-      displayName: botName,
-      name: botName,
-      username: botName,
-      userType: 'guest',
-      isOnline: true
-    };
-    users.set(requestedId, botFallback);
-    return res.json(filterUserForViewer({ viewerIds, user: botFallback }));
   }
 
   // Final fallback
