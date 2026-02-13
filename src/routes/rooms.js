@@ -43,7 +43,16 @@ const ensureBotUser = async () => {
     if (!doc) return null;
     return upsertUserInMemory({ ...doc, id: String(doc.guestId || doc._id) });
   } catch (e) {
-    return null;
+    const fallback = {
+      id: String(BOT_ID),
+      guestId: String(BOT_ID),
+      displayName: String(BOT_NAME),
+      name: String(BOT_NAME),
+      username: String(BOT_NAME),
+      userType: 'guest',
+      isOnline: true
+    };
+    return upsertUserInMemory(fallback);
   }
 };
 

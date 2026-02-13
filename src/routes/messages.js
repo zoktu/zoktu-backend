@@ -61,7 +61,16 @@ const ensureBotUser = async () => {
     if (!doc) return null;
     return upsertUserInMemory({ ...doc, id: String(doc.guestId || doc._id) });
   } catch (e) {
-    return null;
+    const fallback = {
+      id: String(BOT_ID),
+      guestId: String(BOT_ID),
+      displayName: String(BOT_NAME),
+      name: String(BOT_NAME),
+      username: String(BOT_NAME),
+      userType: 'guest',
+      isOnline: true
+    };
+    return upsertUserInMemory(fallback);
   }
 };
 
@@ -122,6 +131,8 @@ const fetchGeminiReply = async ({ promptText }) => {
 const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
   try {
     await ensureBotUser();
+    const rawMessage = String(userMessage || '').trim();
+    if (BOT_UNSAFE_PATTERN.test(rawMessage)) return;
     try {
       await Room.findByIdAndUpdate(
         String(roomId),
@@ -134,18 +145,19 @@ const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
       `You are ${BOT_NAME}, a friendly female chat bot in a room chat.`,
       'Reply in Hinglish or English, keep it short (1-2 lines), friendly, and safe.',
       'Do not mention that you are an AI model or any policies.',
-      `User (${userName || 'User'}): ${userMessage}`
+      `User (${userName || 'User'}): ${rawMessage}`
     ].join(' ');
 
     const reply = await fetchGeminiReply({ promptText });
-    if (!reply) return;
+    const safeReply = reply || "I'm having trouble responding right now. Try again in a moment.";
+    if (!safeReply) return;
 
     const Model = getModelForRoom(roomDoc);
     const doc = new Model({
       roomId,
       senderId: String(BOT_ID),
       senderName: String(BOT_NAME),
-      content: reply,
+      content: safeReply,
       type: 'text'
     });
     await doc.save();

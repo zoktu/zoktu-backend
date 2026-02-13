@@ -179,6 +179,22 @@ router.get('/:id', asyncHandler(async (req, res) => {
     // ignore
   }
 
+  const requestedId = String(req.params.id || '').trim();
+  if (requestedId && env.botId && requestedId === String(env.botId)) {
+    const botName = String(env.botName || 'Bot');
+    const botFallback = {
+      id: requestedId,
+      guestId: requestedId,
+      displayName: botName,
+      name: botName,
+      username: botName,
+      userType: 'guest',
+      isOnline: true
+    };
+    users.set(requestedId, botFallback);
+    return res.json(filterUserForViewer({ viewerIds, user: botFallback }));
+  }
+
   // Final fallback
   const fallback = { id: req.params.id, displayName: 'Guest', userType: 'guest' };
   users.set(req.params.id, fallback);
