@@ -5,9 +5,7 @@ const DEFAULT_PROFANITY = [
   // English / common (romanized)
   'nude','nudity','nudes','porn','pornography','xxx','adult','sex','sexual','sexuality',
   'fuck','fucked','fucking','fucker','fucks','cock','dick','pussy','boobs','tits','breasts','nipples',
-  'anal','oral','blowjob','handjob','masturbate','masturbation','cum','semen','orgasm',
-  // Romanized Hindi / South Asian transliterations (keep as Romanized only)
-  'chut','chutiya','chuti','chudai','chod','choda','gand','gaand','lund','lunda','land','lond','lundoo','bhenchod','madarchod','madar','maderchod','bhosdike','bhosadi','bhosdika','randi','randa','chodna','mutth','mutthi','mutth'
+  'anal','oral','blowjob','handjob','masturbate','masturbation','cum','semen','orgasm','chut','chutiya','chuti','chudai','chod','choda','gand','gaand','lund','lunda','land','lond','lundoo','bhenchod','madarchod','madar','maderchod','bhosdike','bhosadi','bhosdika','randi','randa','chodna','mutth','mutthi','mutth'
 ];
 
 // Precompute normalized bad words for faster checks
@@ -41,32 +39,8 @@ const applyLeetMap = (s) => {
   return s.replace(/[0-9@!$]/g, (ch) => LEET_MAP[ch] || ch);
 };
 
-// Simple Devanagari -> Latin transliteration for common Hindi syllables
-const devanagariToLatin = (text) => {
-  if (!text) return '';
-  // quick bail: if no Devanagari chars, return original
-  if (!/\p{Script=Devanagari}/u.test(text)) return String(text);
-
-  const map = {
-    'अ':'a','आ':'aa','इ':'i','ई':'ii','उ':'u','ऊ':'uu','ए':'e','ऐ':'ai','ओ':'o','औ':'au',
-    'क':'k','ख':'kh','ग':'g','घ':'gh','ङ':'ng',
-    'च':'ch','छ':'chh','ज':'j','झ':'jh','ञ':'ny',
-    'ट':'t','ठ':'th','ड':'d','ढ':'dh','ण':'n',
-    'त':'t','थ':'th','द':'d','ध':'dh','न':'n',
-    'प':'p','फ':'ph','ब':'b','भ':'bh','म':'m',
-    'य':'y','र':'r','ल':'l','व':'v',
-    'श':'sh','ष':'sh','स':'s','ह':'h',
-    'ं':'n','ः':'h','ँ':'n',
-    'ा':'a','ि':'i','ी':'ii','ु':'u','ू':'uu','े':'e','ै':'ai','ो':'o','ौ':'au','्':''
-  };
-
-  // iterate characters and map; this is approximate but sufficient for matching profanity
-  let out = '';
-  for (let ch of String(text)) {
-    out += map[ch] !== undefined ? map[ch] : ch;
-  }
-  return out;
-};
+// Devanagari transliteration removed by request — no-op placeholder
+const devanagariToLatin = (text) => String(text);
 
 const cleanAndTokenize = (text) => {
   if (!text) return [];
