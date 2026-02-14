@@ -58,6 +58,22 @@ const normalizeForMatch = (text) => {
   return s;
 };
 
+// Return proportion of characters in `bad` found as an ordered subsequence in `haystack`
+const subsequenceMatchRatio = (haystack, bad) => {
+  if (!haystack || !bad) return 0;
+  let i = 0, j = 0, matched = 0;
+  const H = String(haystack);
+  const B = String(bad);
+  while (i < H.length && j < B.length) {
+    if (H[i] === B[j]) {
+      matched += 1;
+      j += 1;
+    }
+    i += 1;
+  }
+  return matched / B.length;
+};
+
 export const containsProfanity = (text) => {
   if (!text) return false;
 
@@ -80,6 +96,21 @@ export const containsProfanity = (text) => {
     }
   } catch (e) {
     // fail-open on unexpected errors
+  }
+
+  // Heuristic subsequence matching to catch obfuscation like `f*ck`, `f**k`, `f_ck`, `f.u.c.k` etc.
+  try {
+    const hay = applyLeetMap(String(text).toLowerCase()).replace(/[^a-z0-9\*]/g, '');
+    for (const bad of PROFANITY_SET) {
+      if (!bad) continue;
+      const ratio = subsequenceMatchRatio(hay, bad);
+      // Normal threshold: require most letters present in order
+      if (ratio >= 0.66) return true;
+      // If user used '*' or heavy punctuation obfuscation, be more lenient
+      if (hay.includes('*') && ratio >= 0.5) return true;
+    }
+  } catch (e) {
+    // ignore
   }
 
   return false;
