@@ -10,6 +10,7 @@ import DMRoom from '../models/DMRoom.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
+import { containsProfanity } from '../middleware/profanityFilter.js';
 
 const router = Router();
 export const messages = new Map();
@@ -680,6 +681,10 @@ router.get('/rooms/:roomId/messages', (req, res) => {
           senderId: d.senderId,
           senderName: d.senderName,
           content: d.content,
+          // expose pin info from meta for frontend convenience
+          pinned: Boolean(meta.pinned),
+          pinnedBy: meta.pinnedBy || null,
+          pinnedAt: meta.pinnedAt || null,
           type: d.type,
           attachments: Array.isArray(d.attachments) ? d.attachments : [],
           replyTo: d.replyTo,
@@ -910,6 +915,15 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   // persist to DB using correct model for the room
   const roomDoc = await getRoomDocById(roomId);
 
+  // Profanity / explicit content check - block messages containing disallowed tokens
+  try {
+    if (containsProfanity(content)) {
+      return res.status(400).json({ message: 'Message contains disallowed content' });
+    }
+  } catch (e) {
+    // fail-open on errors
+  }
+
   // Block enforcement for DMs: if either side has blocked the other, do not allow sending.
   try {
     if (isDmRoomDoc(roomDoc)) {
@@ -1060,6 +1074,15 @@ router.patch('/messages/:id', asyncHandler(async (req, res) => {
   const content = (req.body?.content ?? req.body?.message ?? '').toString();
   if (!content.trim()) return res.status(400).json({ message: 'content required' });
 
+  // Block edits that introduce profanity/explicit words
+  try {
+    if (containsProfanity(content)) {
+      return res.status(400).json({ message: 'Message contains disallowed content' });
+    }
+  } catch (e) {
+    // fail-open on detection errors
+  }
+
   const { doc } = await findMessageDocById(id);
   if (!doc) return res.status(404).json({ message: 'Message not found' });
   const allowed = auth.ids.includes(String(doc.senderId));
@@ -1071,6 +1094,90 @@ router.patch('/messages/:id', asyncHandler(async (req, res) => {
   doc.editedAt = new Date();
   await doc.save();
   res.json({ id: doc._id.toString(), roomId: doc.roomId, senderId: doc.senderId, senderName: doc.senderName, content: doc.content, type: doc.type, replyTo: doc.replyTo, timestamp: doc.createdAt, editedAt: doc.editedAt, reactions: Array.isArray(doc.reactions) ? doc.reactions : [], meta: doc.meta || {} });
+}));
+
+// PIN a message (admins/owners only)
+router.post('/messages/:id/pin', asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const { doc } = await findMessageDocById(id);
+  if (!doc) return res.status(404).json({ message: 'Message not found' });
+
+  // Check room owner/admin privileges
+  const roomDoc = await getRoomDocById(String(doc.roomId), 'owner admins type');
+  let isModerator = false;
+  try {
+    if (roomDoc && !isDmRoomDoc(roomDoc)) {
+      const ownerId = roomDoc.owner ? String(roomDoc.owner) : null;
+      const adminIds = Array.isArray(roomDoc.admins) ? roomDoc.admins.map(String) : [];
+      isModerator = (ownerId && auth.ids.includes(ownerId)) || adminIds.some(a => auth.ids.includes(String(a)));
+    }
+  } catch (e) {}
+
+  if (!isModerator) return res.status(403).json({ message: 'Forbidden' });
+
+  const meta = doc.meta || {};
+  meta.pinned = true;
+  meta.pinnedBy = meta.pinnedBy || String(auth.primaryName || auth.primary || '');
+  meta.pinnedAt = new Date().toISOString();
+  doc.meta = meta;
+  await doc.save();
+
+  // Best-effort: update in-memory cache
+  try {
+    const list = messages.get(String(doc.roomId)) || [];
+    const idx = list.findIndex(m => String(m.id) === String(id));
+    if (idx !== -1) {
+      list[idx] = { ...list[idx], pinned: true, pinnedBy: meta.pinnedBy, pinnedAt: meta.pinnedAt };
+      messages.set(String(doc.roomId), list);
+    }
+  } catch (e) {}
+
+  res.json({ id: doc._id.toString(), pinned: true, pinnedBy: meta.pinnedBy, pinnedAt: meta.pinnedAt });
+}));
+
+// UNPIN a message (admins/owners only)
+router.post('/messages/:id/unpin', asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const { doc } = await findMessageDocById(id);
+  if (!doc) return res.status(404).json({ message: 'Message not found' });
+
+  // Check room owner/admin privileges
+  const roomDoc = await getRoomDocById(String(doc.roomId), 'owner admins type');
+  let isModerator = false;
+  try {
+    if (roomDoc && !isDmRoomDoc(roomDoc)) {
+      const ownerId = roomDoc.owner ? String(roomDoc.owner) : null;
+      const adminIds = Array.isArray(roomDoc.admins) ? roomDoc.admins.map(String) : [];
+      isModerator = (ownerId && auth.ids.includes(ownerId)) || adminIds.some(a => auth.ids.includes(String(a)));
+    }
+  } catch (e) {}
+
+  if (!isModerator) return res.status(403).json({ message: 'Forbidden' });
+
+  const meta = doc.meta || {};
+  delete meta.pinned;
+  delete meta.pinnedBy;
+  delete meta.pinnedAt;
+  doc.meta = meta;
+  await doc.save();
+
+  // Best-effort: update in-memory cache
+  try {
+    const list = messages.get(String(doc.roomId)) || [];
+    const idx = list.findIndex(m => String(m.id) === String(id));
+    if (idx !== -1) {
+      list[idx] = { ...list[idx], pinned: false, pinnedBy: undefined, pinnedAt: undefined };
+      messages.set(String(doc.roomId), list);
+    }
+  } catch (e) {}
+
+  res.json({ id: doc._id.toString(), pinned: false });
 }));
 
 router.delete('/messages/:id', asyncHandler(async (req, res) => {
