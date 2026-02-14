@@ -31,6 +31,9 @@ export const env = {
   botReplyCooldownMs: process.env.BOT_REPLY_COOLDOWN_MS || ''
 };
 
+// Redis URL for pub/sub and queues
+env.redisUrl = process.env.REDIS_URL || process.env.REDIS_URI || '';
+
 // Dev helpers (never enable in production)
 env.emailDevMode = (process.env.EMAIL_DEV_MODE || '').toLowerCase() === 'true' || env.nodeEnv !== 'production';
 

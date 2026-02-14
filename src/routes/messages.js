@@ -3,6 +3,7 @@ import fetch from 'node-fetch';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { upsertUserInMemory } from '../lib/userStore.js';
 import { getModelForRoom, RoomMessage, DMMessage, RandomMessage } from '../models/Message.js';
+import redis from '../lib/redisClient.js';
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import Room from '../models/Room.js';
@@ -821,11 +822,37 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
 
   // Prevent spoofing senderId; if provided senderId isn't one of your equivalent ids, fall back to canonical id.
   const senderIdEffective = (senderId && auth.ids.includes(String(senderId))) ? String(senderId) : String(auth.primary);
+
   // word limit check
   const words = (content || '').trim().split(/\s+/).filter(Boolean).length;
   if (words > MAX_WORDS) {
     return res.status(400).json({ message: `Message too long (max ${MAX_WORDS} words)` });
   }
+
+  // Duplicate message spam check (block same message sent repeatedly in short interval)
+  try {
+    const Model = getModelForRoom(await getRoomDocById(roomId));
+    // Find last 2 messages by this user in this room
+    const recentMsgs = await Model.find({
+      roomId,
+      senderId: senderIdEffective
+    })
+      .sort({ createdAt: -1 })
+      .limit(2)
+      .lean();
+    const newMsgNorm = String(content || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const now = Date.now();
+    const DUPLICATE_WINDOW_MS = 10000; // 10 seconds
+    if (recentMsgs && recentMsgs.length > 0) {
+      for (const msg of recentMsgs) {
+        const msgNorm = String(msg.content || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const msgTime = new Date(msg.createdAt).getTime();
+        if (msgNorm && newMsgNorm && msgNorm === newMsgNorm && (now - msgTime) < DUPLICATE_WINDOW_MS) {
+          return res.status(429).json({ message: 'Duplicate message detected. Please do not spam.' });
+        }
+      }
+    }
+  } catch (e) { /* ignore errors in duplicate check */ }
 
   // mute check
   if (isUserMuted(senderIdEffective)) {
@@ -953,65 +980,55 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     // best-effort
   }
 
-  const Model = getModelForRoom(roomDoc);
-  const safeAttachments = Array.isArray(req.body?.attachments)
-    ? req.body.attachments.map(a => ({
-        url: a?.url,
-        fileName: a?.fileName,
-        fileSize: a?.fileSize,
-        mimeType: a?.mimeType,
-        publicId: a?.publicId
-      }))
-    : [];
-
-  const doc = new Model({
-    roomId,
-    senderId: senderIdEffective,
-    senderName: req.body.senderName || '',
-    content,
-    type: req.body.type || 'text',
-    replyTo: replyTo ? String(replyTo) : undefined,
-    attachments: safeAttachments
-  });
-  await doc.save();
-  // keep in-memory cache for quick reads (optional)
+  // enqueue message for background persistence and delivery
   try {
-    const list = messages.get(roomId) || [];
-    list.push({
-      id: doc._id.toString(),
-      roomId,
-      senderId: doc.senderId,
-      senderName: doc.senderName,
-      content: doc.content,
-      type: doc.type,
-      attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
-      timestamp: doc.createdAt.toISOString(),
-      replyTo: doc.replyTo
-    });
-    messages.set(roomId, list);
-  } catch (e) {}
+    const safeAttachments = Array.isArray(req.body?.attachments)
+      ? req.body.attachments.map(a => ({
+          url: a?.url,
+          fileName: a?.fileName,
+          fileSize: a?.fileSize,
+          mimeType: a?.mimeType,
+          publicId: a?.publicId
+        }))
+      : [];
 
-  await createNotificationsForMessage({
-    roomDoc,
-    doc,
-    senderIdEffective,
-    senderName: req.body?.senderName || '',
-    content,
-    replyTo,
-    auth
-  });
+    const clientTempId = `tmp-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+    const job = {
+      roomId: String(roomId),
+      senderId: String(senderIdEffective),
+      senderName: req.body?.senderName || '',
+      content: String(content || ''),
+      type: req.body?.type || 'text',
+      replyTo: replyTo ? String(replyTo) : undefined,
+      attachments: safeAttachments,
+      clientTempId,
+      createdAt: new Date().toISOString(),
+      auth: { ids: Array.isArray(auth?.ids) ? auth.ids.map(String) : [] }
+    };
 
-  await pruneRoomMessages({ roomDoc, roomId, Model });
-  if (await shouldBotReply(roomDoc, senderIdEffective, content, req.body?.type, replyTo)) {
-    botLastReplyByRoom.set(String(roomId), Date.now());
-    setTimeout(() => {
-      postBotReply({
-        roomDoc,
+    await redis.rpush('message_queue', JSON.stringify(job));
+
+    // add temp message to in-memory cache for instant feedback
+    try {
+      const list = messages.get(roomId) || [];
+      list.push({
+        id: clientTempId,
         roomId,
-        userMessage: String(content || '').trim(),
-        userName: req.body?.senderName || ''
+        senderId: String(senderIdEffective),
+        senderName: job.senderName,
+        content: job.content,
+        type: job.type,
+        attachments: Array.isArray(job.attachments) ? job.attachments : [],
+        timestamp: job.createdAt,
+        replyTo: job.replyTo,
+        pending: true
       });
-    }, 800);
+      messages.set(roomId, list);
+    } catch (e) {}
+
+    return res.status(202).json({ id: clientTempId, roomId, timestamp: job.createdAt, pending: true });
+  } catch (e) {
+    // fallback to synchronous persistence on error
   }
   res.json({
     id: doc._id.toString(),
@@ -1163,5 +1180,88 @@ router.post('/messages/:id/view', asyncHandler(async (req, res) => {
   await doc.save();
   res.json({ message: 'view recorded', alreadyViewed: Boolean(existing) });
 }));
+
+// Background worker: consume Redis queue and persist + broadcast messages
+export const startMessageQueueWorker = (io) => {
+  (async function workerLoop() {
+    while (true) {
+      try {
+        const res = await redis.blpop('message_queue', 0);
+        if (!res || !res[1]) continue;
+        let job = null;
+        try { job = JSON.parse(res[1]); } catch (e) { continue; }
+
+        const roomId = String(job.roomId || '');
+        const senderId = String(job.senderId || '');
+        const senderName = String(job.senderName || '');
+        const content = String(job.content || '');
+        const type = String(job.type || 'text');
+        const replyTo = job.replyTo ? String(job.replyTo) : undefined;
+        const attachments = Array.isArray(job.attachments) ? job.attachments : [];
+        const clientTempId = job.clientTempId || null;
+
+        const roomDoc = await getRoomDocById(roomId);
+        const Model = getModelForRoom(roomDoc);
+        const doc = new Model({ roomId, senderId, senderName, content, type, replyTo, attachments });
+        await doc.save();
+
+        try {
+          const list = messages.get(roomId) || [];
+          const idx = list.findIndex(m => String(m.id) === String(clientTempId));
+          const msgObj = {
+            id: doc._id.toString(),
+            roomId,
+            senderId: doc.senderId,
+            senderName: doc.senderName,
+            content: doc.content,
+            type: doc.type,
+            attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
+            timestamp: doc.createdAt.toISOString(),
+            replyTo: doc.replyTo
+          };
+          if (idx !== -1) list[idx] = msgObj;
+          else list.push(msgObj);
+          messages.set(roomId, list);
+        } catch (e) {}
+
+        try {
+          await createNotificationsForMessage({ roomDoc, doc, senderIdEffective: senderId, senderName, content, replyTo, auth: { ids: Array.isArray(job.auth?.ids) ? job.auth.ids : [] } });
+        } catch (e) {}
+
+        try { await pruneRoomMessages({ roomDoc, roomId, Model }); } catch (e) {}
+
+        try {
+          if (await shouldBotReply(roomDoc, senderId, content, type, replyTo)) {
+            botLastReplyByRoom.set(String(roomId), Date.now());
+            setTimeout(() => {
+              postBotReply({ roomDoc, roomId, userMessage: String(content || '').trim(), userName: senderName });
+            }, 800);
+          }
+        } catch (e) {}
+
+        try {
+          const out = {
+            id: doc._id.toString(),
+            roomId,
+            senderId: doc.senderId,
+            senderName: doc.senderName,
+            content: doc.content,
+            type: doc.type,
+            attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
+            timestamp: doc.createdAt.toISOString(),
+            replyTo: doc.replyTo
+          };
+          try { io.to(roomId).emit('room:message', out); } catch (e) {}
+        } catch (e) {}
+
+      } catch (e) {
+        // log and backoff
+        // eslint-disable-next-line no-console
+        console.error('messageQueueWorker error', e);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  })();
+};
 
 export default router;
