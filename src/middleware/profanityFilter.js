@@ -106,6 +106,9 @@ const subsequenceMatchRatio = (haystack, bad) => {
   return matched / B.length;
 };
 
+// Small allowlist of common short/safe tokens to avoid false positives (normalized form)
+const SAFE_ALLOWLIST = new Set(['m','ya','ho','bhai','bro','dude','ok','okay','yes','no','ha','nah','hello','hi'].map(s => normalizeWord(s)));
+
 export const containsProfanity = (text) => {
   if (!text) return false;
 
@@ -132,11 +135,18 @@ export const containsProfanity = (text) => {
 
   // Dense normalized string check (handles underscores, punctuation, mixed-case, repeated chars, joined words)
   try {
-    const dense = normalizeForMatch(text);
-    if (dense) {
+    // Work per-token to avoid matching across unrelated long words
+    const denseTokens = cleanAndTokenize(String(text).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ')).map(t => normalizeWord(applyLeetMap(t)));
+    if (denseTokens && denseTokens.length) {
       for (const bad of PROFANITY_SET) {
         if (!bad) continue;
-        if (dense.includes(bad)) return true;
+        for (const tok of denseTokens) {
+          if (!tok) continue;
+          // skip safe short tokens and extremely short words
+          if (SAFE_ALLOWLIST.has(tok) || tok.length <= 2) continue;
+          // require token to contain the bad term and not be an overly long unrelated word
+          if (tok.includes(bad) && tok.length <= bad.length + 3) return true;
+        }
       }
     }
   } catch (e) {
@@ -145,15 +155,22 @@ export const containsProfanity = (text) => {
 
   // Heuristic subsequence matching to catch obfuscation like `f*ck`, `f**k`, `f_ck`, `f.u.c.k` etc.
   try {
-    // allow unicode letters/digits and '*' for subsequence heuristic
-    const hay = applyLeetMap(String(text).toLowerCase()).replace(/[^\p{L}\p{N}\*]/gu, '');
-    for (const bad of PROFANITY_SET) {
-      if (!bad) continue;
-      const ratio = subsequenceMatchRatio(hay, bad);
-      // Normal threshold: require most letters present in order
-      if (ratio >= 0.66) return true;
-      // If user used '*' or heavy punctuation obfuscation, be more lenient
-      if (hay.includes('*') && ratio >= 0.5) return true;
+    // Tokenize and apply subsequence check per token to avoid cross-word false positives
+    const raw = applyLeetMap(String(text).toLowerCase()).replace(/[^\p{L}\p{N}\*\s]/gu, ' ');
+    const tokenHay = cleanAndTokenize(raw);
+    for (const token of tokenHay) {
+      if (!token) continue;
+      const normTok = normalizeWord(applyLeetMap(token));
+      // skip safe short tokens and extremely short words
+      if (!normTok || SAFE_ALLOWLIST.has(normTok) || normTok.length <= 2) continue;
+      for (const bad of PROFANITY_SET) {
+        if (!bad) continue;
+        const ratio = subsequenceMatchRatio(normTok, bad);
+        // Tighten normal threshold to reduce false positives
+        if (ratio >= 0.85) return true;
+        // If token contains '*' allow a slightly lower threshold
+        if (token.includes('*') && ratio >= 0.7) return true;
+      }
     }
   } catch (e) {
     // ignore
