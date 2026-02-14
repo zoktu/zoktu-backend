@@ -1088,10 +1088,11 @@ router.post('/random', requireVerifiedForHighRisk, async (req, res) => {
       waitingQueue.splice(i, 1);
       const id = `dm-${Date.now()}`;
       // Store as a private room with category 'dm'
-      const room = { id, type: 'private', category: 'dm', participants: [waiter.userId, userId] };
+      // Mark random-paired DM rooms as anonymous so clients can hide real identities
+      const room = { id, type: 'private', category: 'dm', participants: [waiter.userId, userId], settings: { anonymous: true } };
       // persist
       try {
-        const doc = new DMRoom({ _id: id, name: `DM:${waiter.userId}:${userId}`, type: 'private', category: 'dm', participants: room.participants, members: room.participants, createdBy: waiter.userId });
+        const doc = new DMRoom({ _id: id, name: `DM:${waiter.userId}:${userId}`, type: 'private', category: 'dm', participants: room.participants, members: room.participants, createdBy: waiter.userId, settings: { anonymous: true } });
         await doc.save();
       } catch (e) { console.warn('Could not persist random DM room', e?.message || e); }
       rooms.set(id, room);
