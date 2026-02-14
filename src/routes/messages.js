@@ -3,7 +3,6 @@ import fetch from 'node-fetch';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { upsertUserInMemory } from '../lib/userStore.js';
 import { getModelForRoom, RoomMessage, DMMessage, RandomMessage } from '../models/Message.js';
-import redis from '../lib/redisClient.js';
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import Room from '../models/Room.js';
@@ -980,55 +979,65 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     // best-effort
   }
 
-  // enqueue message for background persistence and delivery
+  const Model = getModelForRoom(roomDoc);
+  const safeAttachments = Array.isArray(req.body?.attachments)
+    ? req.body.attachments.map(a => ({
+        url: a?.url,
+        fileName: a?.fileName,
+        fileSize: a?.fileSize,
+        mimeType: a?.mimeType,
+        publicId: a?.publicId
+      }))
+    : [];
+
+  const doc = new Model({
+    roomId,
+    senderId: senderIdEffective,
+    senderName: req.body.senderName || '',
+    content,
+    type: req.body.type || 'text',
+    replyTo: replyTo ? String(replyTo) : undefined,
+    attachments: safeAttachments
+  });
+  await doc.save();
+  // keep in-memory cache for quick reads (optional)
   try {
-    const safeAttachments = Array.isArray(req.body?.attachments)
-      ? req.body.attachments.map(a => ({
-          url: a?.url,
-          fileName: a?.fileName,
-          fileSize: a?.fileSize,
-          mimeType: a?.mimeType,
-          publicId: a?.publicId
-        }))
-      : [];
+    const list = messages.get(roomId) || [];
+    list.push({
+      id: doc._id.toString(),
+      roomId,
+      senderId: doc.senderId,
+      senderName: doc.senderName,
+      content: doc.content,
+      type: doc.type,
+      attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
+      timestamp: doc.createdAt.toISOString(),
+      replyTo: doc.replyTo
+    });
+    messages.set(roomId, list);
+  } catch (e) {}
 
-    const clientTempId = `tmp-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-    const job = {
-      roomId: String(roomId),
-      senderId: String(senderIdEffective),
-      senderName: req.body?.senderName || '',
-      content: String(content || ''),
-      type: req.body?.type || 'text',
-      replyTo: replyTo ? String(replyTo) : undefined,
-      attachments: safeAttachments,
-      clientTempId,
-      createdAt: new Date().toISOString(),
-      auth: { ids: Array.isArray(auth?.ids) ? auth.ids.map(String) : [] }
-    };
+  await createNotificationsForMessage({
+    roomDoc,
+    doc,
+    senderIdEffective,
+    senderName: req.body?.senderName || '',
+    content,
+    replyTo,
+    auth
+  });
 
-    await redis.rpush('message_queue', JSON.stringify(job));
-
-    // add temp message to in-memory cache for instant feedback
-    try {
-      const list = messages.get(roomId) || [];
-      list.push({
-        id: clientTempId,
+  await pruneRoomMessages({ roomDoc, roomId, Model });
+  if (await shouldBotReply(roomDoc, senderIdEffective, content, req.body?.type, replyTo)) {
+    botLastReplyByRoom.set(String(roomId), Date.now());
+    setTimeout(() => {
+      postBotReply({
+        roomDoc,
         roomId,
-        senderId: String(senderIdEffective),
-        senderName: job.senderName,
-        content: job.content,
-        type: job.type,
-        attachments: Array.isArray(job.attachments) ? job.attachments : [],
-        timestamp: job.createdAt,
-        replyTo: job.replyTo,
-        pending: true
+        userMessage: String(content || '').trim(),
+        userName: req.body?.senderName || ''
       });
-      messages.set(roomId, list);
-    } catch (e) {}
-
-    return res.status(202).json({ id: clientTempId, roomId, timestamp: job.createdAt, pending: true });
-  } catch (e) {
-    // fallback to synchronous persistence on error
+    }, 800);
   }
   res.json({
     id: doc._id.toString(),
@@ -1180,88 +1189,5 @@ router.post('/messages/:id/view', asyncHandler(async (req, res) => {
   await doc.save();
   res.json({ message: 'view recorded', alreadyViewed: Boolean(existing) });
 }));
-
-// Background worker: consume Redis queue and persist + broadcast messages
-export const startMessageQueueWorker = (io) => {
-  (async function workerLoop() {
-    while (true) {
-      try {
-        const res = await redis.blpop('message_queue', 0);
-        if (!res || !res[1]) continue;
-        let job = null;
-        try { job = JSON.parse(res[1]); } catch (e) { continue; }
-
-        const roomId = String(job.roomId || '');
-        const senderId = String(job.senderId || '');
-        const senderName = String(job.senderName || '');
-        const content = String(job.content || '');
-        const type = String(job.type || 'text');
-        const replyTo = job.replyTo ? String(job.replyTo) : undefined;
-        const attachments = Array.isArray(job.attachments) ? job.attachments : [];
-        const clientTempId = job.clientTempId || null;
-
-        const roomDoc = await getRoomDocById(roomId);
-        const Model = getModelForRoom(roomDoc);
-        const doc = new Model({ roomId, senderId, senderName, content, type, replyTo, attachments });
-        await doc.save();
-
-        try {
-          const list = messages.get(roomId) || [];
-          const idx = list.findIndex(m => String(m.id) === String(clientTempId));
-          const msgObj = {
-            id: doc._id.toString(),
-            roomId,
-            senderId: doc.senderId,
-            senderName: doc.senderName,
-            content: doc.content,
-            type: doc.type,
-            attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
-            timestamp: doc.createdAt.toISOString(),
-            replyTo: doc.replyTo
-          };
-          if (idx !== -1) list[idx] = msgObj;
-          else list.push(msgObj);
-          messages.set(roomId, list);
-        } catch (e) {}
-
-        try {
-          await createNotificationsForMessage({ roomDoc, doc, senderIdEffective: senderId, senderName, content, replyTo, auth: { ids: Array.isArray(job.auth?.ids) ? job.auth.ids : [] } });
-        } catch (e) {}
-
-        try { await pruneRoomMessages({ roomDoc, roomId, Model }); } catch (e) {}
-
-        try {
-          if (await shouldBotReply(roomDoc, senderId, content, type, replyTo)) {
-            botLastReplyByRoom.set(String(roomId), Date.now());
-            setTimeout(() => {
-              postBotReply({ roomDoc, roomId, userMessage: String(content || '').trim(), userName: senderName });
-            }, 800);
-          }
-        } catch (e) {}
-
-        try {
-          const out = {
-            id: doc._id.toString(),
-            roomId,
-            senderId: doc.senderId,
-            senderName: doc.senderName,
-            content: doc.content,
-            type: doc.type,
-            attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
-            timestamp: doc.createdAt.toISOString(),
-            replyTo: doc.replyTo
-          };
-          try { io.to(roomId).emit('room:message', out); } catch (e) {}
-        } catch (e) {}
-
-      } catch (e) {
-        // log and backoff
-        // eslint-disable-next-line no-console
-        console.error('messageQueueWorker error', e);
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    }
-  })();
-};
 
 export default router;

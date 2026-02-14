@@ -34,6 +34,10 @@ export const env = {
 // Redis URL for pub/sub and queues
 env.redisUrl = process.env.REDIS_URL || process.env.REDIS_URI || '';
 
+// Prerender service (optional) - e.g., https://service.prerender.io
+env.prerenderServiceUrl = process.env.PRERENDER_SERVICE_URL || '';
+env.prerenderToken = process.env.PRERENDER_TOKEN || '';
+
 // Dev helpers (never enable in production)
 env.emailDevMode = (process.env.EMAIL_DEV_MODE || '').toLowerCase() === 'true' || env.nodeEnv !== 'production';
 

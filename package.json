@@ -19,17 +19,12 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "helmet": "^7.0.0",
-    "compression": "^1.7.4",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.5.3",
     "morgan": "^1.10.0",
     "node-fetch": "^3.3.2",
     "nodemailer": "^6.10.1",
-    "socket.io": "^4.7.2",
-    "ioredis": "^5.3.2"
-  },
-  "optionalDependencies": {
-    "@socket.io/redis-adapter": "^7.1.0"
+    "socket.io": "^4.7.2"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"

@@ -9,9 +9,7 @@ import routes from './routes/index.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { createServer } from 'http';
 import { Server as IOServer } from 'socket.io';
-import { createAdapter } from '@socket.io/redis-adapter';
-import Redis from 'ioredis';
-import { messages, startMessageQueueWorker } from './routes/messages.js';
+import { messages } from './routes/messages.js';
 import { updateUserPresenceInMemory, upsertUserInMemory } from './lib/userStore.js';
 import Message from './models/Message.js';
 import Room from './models/Room.js';
@@ -49,28 +47,6 @@ const httpServer = createServer(app);
 const io = new IOServer(httpServer, {
   cors: { origin: env.clientOrigin, methods: ['GET', 'POST'] }
 });
-
-// Configure Redis adapter for Socket.IO if redisUrl is provided (enables multi-instance scaling)
-try {
-  const redisUrl = env.redisUrl || process.env.REDIS_URL || '';
-  if (redisUrl) {
-    const pubClient = new Redis(redisUrl);
-    const subClient = pubClient.duplicate();
-    io.adapter(createAdapter(pubClient, subClient));
-  } else {
-    // try local defaults
-    const pubClient = new Redis();
-    const subClient = pubClient.duplicate();
-    io.adapter(createAdapter(pubClient, subClient));
-  }
-} catch (e) {
-  // best-effort; if adapter fails, continue without it
-  // eslint-disable-next-line no-console
-  console.warn('Socket.IO Redis adapter not available or failed to initialize:', e && e.message);
-}
-
-// start background worker to consume Redis queue and persist messages
-startMessageQueueWorker(io);
 
 // Simple in-memory socket registries and waiting queue for random pairing
 const socketsByUser = new Map(); // userId -> socket
