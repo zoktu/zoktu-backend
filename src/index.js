@@ -12,6 +12,7 @@ import { messages } from './routes/messages.js';
 import { updateUserPresenceInMemory, upsertUserInMemory } from './lib/userStore.js';
 import Message from './models/Message.js';
 import Room from './models/Room.js';
+import DMRoom from './models/DMRoom.js';
 import User from './models/User.js';
 
 const app = express();
@@ -55,6 +56,34 @@ const MESSAGE_WINDOW_MS = 15000; // 15s window
 const MESSAGE_LIMIT = 8; // more than this in window => mute
 const MUTE_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_WORDS = 300; // maximum words allowed per message
+
+const updateRoomDocById = async (id, update) => {
+  if (!id) return null;
+  const preferDm = String(id).startsWith('dm-');
+  const primary = preferDm ? DMRoom : Room;
+  const secondary = preferDm ? Room : DMRoom;
+
+  await primary.findByIdAndUpdate(id, update).catch(() => null);
+  let doc = await primary.findById(id).lean().catch(() => null);
+  if (doc) return doc;
+
+  await secondary.findByIdAndUpdate(id, update).catch(() => null);
+  doc = await secondary.findById(id).lean().catch(() => null);
+  return doc;
+};
+
+const getRoomDocById = async (id) => {
+  if (!id) return null;
+  const preferDm = String(id).startsWith('dm-');
+  const primary = preferDm ? DMRoom : Room;
+  const secondary = preferDm ? Room : DMRoom;
+
+  let doc = await primary.findById(id).lean().catch(() => null);
+  if (doc) return doc;
+
+  doc = await secondary.findById(id).lean().catch(() => null);
+  return doc;
+};
 
 const isUserMuted = (userId) => {
   if (!userId) return false;
@@ -193,7 +222,7 @@ io.on('connection', (socket) => {
         try { waiter.socket.join(roomId); } catch (e) {}
         // persist DM room in DB (best-effort)
         try {
-          const doc = new Room({ _id: roomId, type: 'dm', participants: [waiter.uid, uid], members: [waiter.uid, uid], createdBy: waiter.uid });
+          const doc = new DMRoom({ _id: roomId, type: 'dm', category: 'dm', participants: [waiter.uid, uid], members: [waiter.uid, uid], createdBy: waiter.uid });
           await doc.save();
         } catch (e) {}
         // notify both
@@ -228,7 +257,7 @@ io.on('connection', (socket) => {
       // notify all in room
       io.to(roomId).emit('room:ended', { roomId, by: userId || null });
       // mark room inactive in DB (best-effort)
-      try { Room.findByIdAndUpdate(roomId, { isActive: false }).catch(() => {}); } catch (e) {}
+      try { updateRoomDocById(roomId, { isActive: false }).catch(() => {}); } catch (e) {}
       // optionally force leave
       const socketsInRoom = io.sockets.adapter.rooms.get(roomId) || new Set();
       for (const sid of socketsInRoom) {
@@ -270,7 +299,7 @@ io.on('connection', (socket) => {
           (async () => {
             try {
               // determine room type and pick the model
-              const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+              const roomDoc = await getRoomDocById(roomId);
               const Model = (await import('./models/Message.js')).getModelForRoom(roomDoc);
               const doc = new Model({ roomId, senderId, senderName: senderName || '', content, type: 'text' });
               await doc.save();

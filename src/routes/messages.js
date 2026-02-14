@@ -6,6 +6,7 @@ import { getModelForRoom, RoomMessage, DMMessage, RandomMessage } from '../model
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import Room from '../models/Room.js';
+import DMRoom from '../models/DMRoom.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
@@ -34,6 +35,38 @@ const BOT_REPLY_COOLDOWN_MS = Number.isFinite(Number(env.botReplyCooldownMs))
 const BOT_ENABLED = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
 const botLastReplyByRoom = new Map();
 const BOT_UNSAFE_PATTERN = /(kill yourself|self-harm|suicide|rape|terrorist|nazi)/i;
+
+const getRoomDocById = async (id, select = null) => {
+  if (!id) return null;
+  const preferDm = String(id).startsWith('dm-');
+  const primary = preferDm ? DMRoom : Room;
+  const secondary = preferDm ? Room : DMRoom;
+
+  let query = primary.findById(id);
+  if (select) query = query.select(select);
+  let doc = await query.lean().catch(() => null);
+  if (doc) return doc;
+
+  query = secondary.findById(id);
+  if (select) query = query.select(select);
+  doc = await query.lean().catch(() => null);
+  return doc;
+};
+
+const updateRoomDocById = async (id, update, options = {}) => {
+  if (!id) return null;
+  const preferDm = String(id).startsWith('dm-');
+  const primary = preferDm ? DMRoom : Room;
+  const secondary = preferDm ? Room : DMRoom;
+
+  await primary.findByIdAndUpdate(id, update, options).catch(() => null);
+  let doc = await primary.findById(id).lean().catch(() => null);
+  if (doc) return doc;
+
+  await secondary.findByIdAndUpdate(id, update, options).catch(() => null);
+  doc = await secondary.findById(id).lean().catch(() => null);
+  return doc;
+};
 
 const ensureBotUser = async () => {
   if (!BOT_ENABLED) return null;
@@ -159,11 +192,11 @@ const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
     const rawMessage = String(userMessage || '').trim();
     if (BOT_UNSAFE_PATTERN.test(rawMessage)) return;
     try {
-      await Room.findByIdAndUpdate(
+      await updateRoomDocById(
         String(roomId),
         { $addToSet: { participants: String(BOT_ID), members: String(BOT_ID) }, $set: { updatedAt: new Date() } },
         { upsert: false }
-      ).catch(() => null);
+      );
     } catch (e) {}
 
     const promptText = [
@@ -592,7 +625,7 @@ router.get('/rooms/:roomId/messages', (req, res) => {
   // load from DB (most recent first or paginated)
   (async () => {
     try {
-      const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+      const roomDoc = await getRoomDocById(roomId);
       const Model = getModelForRoom(roomDoc);
       const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
       const before = req.query.before; // cursor for pagination (messageId or timestamp)
@@ -693,7 +726,7 @@ router.post('/rooms/:roomId/messages/clear-for-me', asyncHandler(async (req, res
   const auth = await getAuthIdentity(req);
   if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
 
-  const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+  const roomDoc = await getRoomDocById(roomId);
   const Model = getModelForRoom(roomDoc);
   await Model.updateMany(
     { roomId },
@@ -709,7 +742,7 @@ router.post('/rooms/:roomId/messages/mark-delivered', asyncHandler(async (req, r
   const auth = await getAuthIdentity(req);
   if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
 
-  const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+  const roomDoc = await getRoomDocById(roomId);
   if (!isDmRoomDoc(roomDoc)) return res.status(400).json({ message: 'Receipts supported only for DMs' });
 
   const receiptIds = normalizeReceiptIds(auth);
@@ -740,7 +773,7 @@ router.post('/rooms/:roomId/messages/mark-read', asyncHandler(async (req, res) =
   const auth = await getAuthIdentity(req);
   if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
 
-  const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+  const roomDoc = await getRoomDocById(roomId);
   if (!isDmRoomDoc(roomDoc)) return res.status(400).json({ message: 'Receipts supported only for DMs' });
 
   // Respect user setting to not send read receipts.
@@ -803,7 +836,7 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   // Check room-level bans/mutes (by userId or IP)
   try {
     const ip = (req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.ip || '').toString().split(',')[0].trim();
-    const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+    const roomDoc = await getRoomDocById(roomId);
     if (roomDoc) {
       // check direct userId ban
       if (Array.isArray(roomDoc.bannedUsers) && auth?.ids?.length) {
@@ -849,7 +882,7 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   }
 
   // persist to DB using correct model for the room
-  const roomDoc = await Room.findById(roomId).lean().catch(() => null);
+  const roomDoc = await getRoomDocById(roomId);
 
   // Block enforcement for DMs: if either side has blocked the other, do not allow sending.
   try {
@@ -1025,7 +1058,7 @@ router.delete('/messages/:id', asyncHandler(async (req, res) => {
 
   let isModerator = false;
   try {
-    const roomDoc = await Room.findById(String(doc.roomId)).select('owner admins type category').lean().catch(() => null);
+    const roomDoc = await getRoomDocById(String(doc.roomId), 'owner admins type category');
     if (roomDoc && !isDmRoomDoc(roomDoc)) {
       const ownerId = roomDoc.owner ? String(roomDoc.owner) : null;
       const adminIds = Array.isArray(roomDoc.admins) ? roomDoc.admins.map(String) : [];
@@ -1037,7 +1070,7 @@ router.delete('/messages/:id', asyncHandler(async (req, res) => {
 
   // For DM rooms: soft-delete so both sides see "Message deleted" (instead of disappearing).
   try {
-    const roomDoc = await Room.findById(String(doc.roomId)).lean().catch(() => null);
+    const roomDoc = await getRoomDocById(String(doc.roomId));
     const isDmByModel = Boolean(Model && DMMessage && Model === DMMessage);
     if (isDmByModel || isDmRoomDoc(roomDoc)) {
       const meta = doc.meta || {};

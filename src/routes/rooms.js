@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import Room from '../models/Room.js';
+import DMRoom from '../models/DMRoom.js';
 import { users, upsertUserInMemory } from '../lib/userStore.js';
 import User from '../models/User.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
@@ -86,6 +87,28 @@ const isDmRoomDoc = (doc) => Boolean(
     (doc.type === 'private' && doc.category === 'dm')
   )
 );
+
+const findRoomDocById = async (id) => {
+  if (!id) return { doc: null, model: null };
+  const preferDm = String(id).startsWith('dm-');
+  const primary = preferDm ? DMRoom : Room;
+  const secondary = preferDm ? Room : DMRoom;
+
+  let doc = await primary.findById(id).lean().catch(() => null);
+  if (doc) return { doc, model: primary };
+
+  doc = await secondary.findById(id).lean().catch(() => null);
+  if (doc) return { doc, model: secondary };
+
+  return { doc: null, model: null };
+};
+
+const updateRoomById = async (id, update, options = {}) => {
+  const { doc, model } = await findRoomDocById(id);
+  if (!model || !doc) return null;
+  await model.findByIdAndUpdate(id, update, options).catch(() => null);
+  return model.findById(id).lean().catch(() => null);
+};
 
 const expandUserIdentifiers = async ({ id, email }) => {
   const ids = new Set();
@@ -229,7 +252,11 @@ router.get('/', asyncHandler(async (req, res) => {
       { $addFields: { memberCount: { $size: { $ifNull: ["$members", []] } } } },
       { $sort: { memberCount: -1, updatedAt: -1 } }
     ];
-    const docs = await Room.aggregate(pipeline).allowDiskUse(true).exec();
+    const [roomDocs, dmRoomDocs] = await Promise.all([
+      Room.aggregate(pipeline).allowDiskUse(true).exec(),
+      DMRoom.aggregate(pipeline).allowDiskUse(true).exec()
+    ]);
+    const docs = [...(roomDocs || []), ...(dmRoomDocs || [])];
 
     // De-dupe DMs: only one conversation per participant-pair
     // Canonicalize ids so guestId vs Mongo _id variants collapse.
@@ -338,7 +365,12 @@ router.post('/:id/hide', asyncHandler(async (req, res) => {
   if (!id) return res.status(400).json({ message: 'Invalid room id' });
 
   let roomDoc = null;
-  try { roomDoc = await Room.findById(id).lean().catch(() => null); } catch (e) {}
+  let roomModel = null;
+  try {
+    const found = await findRoomDocById(id);
+    roomDoc = found.doc;
+    roomModel = found.model;
+  } catch (e) {}
   const inMemory = rooms.get(id) || null;
   if (!roomDoc && !inMemory) return res.status(404).json({ message: 'Room not found' });
 
@@ -353,11 +385,13 @@ router.post('/:id/hide', asyncHandler(async (req, res) => {
   if (!isMember) return res.status(403).json({ message: 'You are not a member of this room' });
 
   try {
-    await Room.findByIdAndUpdate(
-      id,
-      { $addToSet: { hiddenFor: String(canonical) }, $set: { updatedAt: new Date() } },
-      { upsert: false }
-    ).lean();
+    if (roomModel) {
+      await roomModel.findByIdAndUpdate(
+        id,
+        { $addToSet: { hiddenFor: String(canonical) }, $set: { updatedAt: new Date() } },
+        { upsert: false }
+      ).lean();
+    }
   } catch (e) {
     // best-effort
   }
@@ -452,8 +486,8 @@ router.get('/:id', asyncHandler(async (req, res) => {
   const id = req.params.id;
   // try DB first
   try {
-    const doc = await Room.findById(id).lean();
-    if (doc) return res.json({ id: doc._id, ...doc });
+    const found = await findRoomDocById(id);
+    if (found?.doc) return res.json({ id: found.doc._id, ...found.doc });
   } catch (e) {}
   const room = rooms.get(id);
   if (!room) return res.status(404).json({ message: 'Room not found' });
@@ -467,7 +501,12 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
 
   // Prefer DB-backed join so it survives restarts; fall back to in-memory.
   let roomDoc = null;
-  try { roomDoc = await Room.findById(id).lean().catch(() => null); } catch (e) {}
+  let roomModel = null;
+  try {
+    const found = await findRoomDocById(id);
+    roomDoc = found.doc;
+    roomModel = found.model;
+  } catch (e) {}
 
   const roomMem = rooms.get(id) || null;
   if (!roomDoc && !roomMem) return res.status(404).json({ message: 'Room not found' });
@@ -501,17 +540,17 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
   } catch (e) {}
 
   // Update DB if present
-  if (roomDoc) {
+  if (roomDoc && roomModel) {
     try {
       const addParticipants = shouldAddBot
         ? { $each: [String(userId), String(BOT_ID)] }
         : String(userId);
-      await Room.findByIdAndUpdate(
+      await roomModel.findByIdAndUpdate(
         id,
         { $addToSet: { participants: addParticipants, members: addParticipants }, $set: { updatedAt: new Date() } },
         { upsert: false }
       );
-      const fresh = await Room.findById(id).lean().catch(() => null);
+      const fresh = await roomModel.findById(id).lean().catch(() => null);
       if (fresh) {
         // keep cache lightly in sync
         try { rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh }); } catch (e) {}
@@ -550,7 +589,12 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   const id = req.params.id;
   // verify room exists
   let roomDoc = null;
-  try { roomDoc = await Room.findById(id).lean(); } catch (e) {}
+  let roomModel = null;
+  try {
+    const found = await findRoomDocById(id);
+    roomDoc = found.doc;
+    roomModel = found.model;
+  } catch (e) {}
   if (!roomDoc) {
     // also check in-memory
     if (!rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
@@ -602,7 +646,7 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   }
 
   try {
-    if (roomDoc) await Room.deleteOne({ _id: id });
+    if (roomDoc && roomModel) await roomModel.deleteOne({ _id: id });
   } catch (e) {
     console.warn('Failed to delete room from DB', e?.message || e);
   }
@@ -621,7 +665,9 @@ router.post('/:id/ban', asyncHandler(async (req, res) => {
 
   const id = req.params.id;
   const { targetUserId, ip, banIp } = req.body || {};
-  const roomDoc = await Room.findById(id).lean().catch(() => null);
+  const found = await findRoomDocById(id);
+  const roomDoc = found.doc;
+  const roomModel = found.model;
   if (!roomDoc && !rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
 
   const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
@@ -663,12 +709,12 @@ router.post('/:id/ban', asyncHandler(async (req, res) => {
       if (uniqueBannedIds.length) updateObj.$addToSet = { bannedUsers: { $each: uniqueBannedIds } };
       if (bannedIpList.length) updateObj.$addToSet = Object.assign(updateObj.$addToSet || {}, { bannedIPs: { $each: bannedIpList } });
 
-      if (Object.keys(updateObj).length) {
-        await Room.findByIdAndUpdate(id, updateObj, { upsert: false }).catch(() => null);
+      if (Object.keys(updateObj).length && roomModel) {
+        await roomModel.findByIdAndUpdate(id, updateObj, { upsert: false }).catch(() => null);
       }
 
       try {
-        const fresh = await Room.findById(id).lean().catch(() => null);
+        const fresh = roomModel ? await roomModel.findById(id).lean().catch(() => null) : null;
         if (fresh) {
           rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
         }
@@ -695,7 +741,9 @@ router.post('/:id/mute', asyncHandler(async (req, res) => {
 
   const id = req.params.id;
   const { targetUserId, ip, durationMs } = req.body || {};
-  const roomDoc = await Room.findById(id).lean().catch(() => null);
+  const found = await findRoomDocById(id);
+  const roomDoc = found.doc;
+  const roomModel = found.model;
   if (!roomDoc && !rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
 
   const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
@@ -711,19 +759,21 @@ router.post('/:id/mute', asyncHandler(async (req, res) => {
 
   const until = new Date(Date.now() + (Number(durationMs) || (5 * 60 * 1000)));
   try {
-    if (targetUserId) {
-      await Room.findByIdAndUpdate(id, { $push: { mutedUsers: { userId: targetUserId, until } } }).catch(() => null);
-    }
-    if (ip) {
-      await Room.findByIdAndUpdate(id, { $push: { mutedIPs: { ip, until } } }).catch(() => null);
-    }
-
-    try {
-      const fresh = await Room.findById(id).lean().catch(() => null);
-      if (fresh) {
-        rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
+    if (roomModel) {
+      if (targetUserId) {
+        await roomModel.findByIdAndUpdate(id, { $push: { mutedUsers: { userId: targetUserId, until } } }).catch(() => null);
       }
-    } catch (e) {}
+      if (ip) {
+        await roomModel.findByIdAndUpdate(id, { $push: { mutedIPs: { ip, until } } }).catch(() => null);
+      }
+
+      try {
+        const fresh = await roomModel.findById(id).lean().catch(() => null);
+        if (fresh) {
+          rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
+        }
+      } catch (e) {}
+    }
     return res.json({ message: 'Muted', targetUserId, ip, until });
   } catch (e) {
     console.warn('Mute failed', e?.message || e);
@@ -741,7 +791,9 @@ router.post('/:id/unban', asyncHandler(async (req, res) => {
 
   const id = req.params.id;
   const { targetUserId, ip } = req.body || {};
-  const roomDoc = await Room.findById(id).lean().catch(() => null);
+  const found = await findRoomDocById(id);
+  const roomDoc = found.doc;
+  const roomModel = found.model;
   if (!roomDoc && !rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
 
   const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
@@ -762,10 +814,12 @@ router.post('/:id/unban', asyncHandler(async (req, res) => {
   if (!Object.keys(updateObj).length) return res.status(400).json({ message: 'targetUserId or ip required' });
 
   try {
-    await Room.findByIdAndUpdate(id, updateObj, { upsert: false }).catch(() => null);
-    const fresh = await Room.findById(id).lean().catch(() => null);
-    if (fresh) {
-      rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
+    if (roomModel) {
+      await roomModel.findByIdAndUpdate(id, updateObj, { upsert: false }).catch(() => null);
+      const fresh = await roomModel.findById(id).lean().catch(() => null);
+      if (fresh) {
+        rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
+      }
     }
     return res.json({ message: 'Unbanned', targetUserId, ip });
   } catch (e) {
@@ -784,7 +838,9 @@ router.post('/:id/unmute', asyncHandler(async (req, res) => {
 
   const id = req.params.id;
   const { targetUserId, ip } = req.body || {};
-  const roomDoc = await Room.findById(id).lean().catch(() => null);
+  const found = await findRoomDocById(id);
+  const roomDoc = found.doc;
+  const roomModel = found.model;
   if (!roomDoc && !rooms.has(id)) return res.status(404).json({ message: 'Room not found' });
 
   const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
@@ -805,10 +861,12 @@ router.post('/:id/unmute', asyncHandler(async (req, res) => {
   if (!Object.keys(updateObj).length) return res.status(400).json({ message: 'targetUserId or ip required' });
 
   try {
-    await Room.findByIdAndUpdate(id, updateObj, { upsert: false }).catch(() => null);
-    const fresh = await Room.findById(id).lean().catch(() => null);
-    if (fresh) {
-      rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
+    if (roomModel) {
+      await roomModel.findByIdAndUpdate(id, updateObj, { upsert: false }).catch(() => null);
+      const fresh = await roomModel.findById(id).lean().catch(() => null);
+      if (fresh) {
+        rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
+      }
     }
     return res.json({ message: 'Unmuted', targetUserId, ip });
   } catch (e) {
@@ -824,18 +882,23 @@ router.post('/:id/leave', asyncHandler(async (req, res) => {
 
   // Prefer DB-backed leave so it survives restarts; fall back to in-memory.
   let roomDoc = null;
-  try { roomDoc = await Room.findById(id).lean().catch(() => null); } catch (e) {}
+  let roomModel = null;
+  try {
+    const found = await findRoomDocById(id);
+    roomDoc = found.doc;
+    roomModel = found.model;
+  } catch (e) {}
   const roomMem = rooms.get(id) || null;
   if (!roomDoc && !roomMem) return res.status(404).json({ message: 'Room not found' });
 
-  if (roomDoc) {
+  if (roomDoc && roomModel) {
     try {
-      await Room.findByIdAndUpdate(
+      await roomModel.findByIdAndUpdate(
         id,
         { $pull: { participants: String(userId), members: String(userId) }, $set: { updatedAt: new Date() } },
         { upsert: false }
       );
-      const fresh = await Room.findById(id).lean().catch(() => null);
+      const fresh = await roomModel.findById(id).lean().catch(() => null);
       if (fresh) {
         try { rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh }); } catch (e) {}
         return res.json({ id: fresh._id, ...fresh });
@@ -873,8 +936,10 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   }
 
   try {
-    const roomDoc = await Room.findById(id).lean();
-    if (!roomDoc) return res.status(404).json({ message: 'Room not found' });
+    const found = await findRoomDocById(id);
+    const roomDoc = found.doc;
+    const roomModel = found.model;
+    if (!roomDoc || !roomModel) return res.status(404).json({ message: 'Room not found' });
 
     const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
     const requesterSet = new Set(uniqStrings(requesterExpanded));
@@ -894,7 +959,7 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     }
 
     setObj.updatedAt = new Date();
-    const updated = await Room.findByIdAndUpdate(id, { $set: setObj }, { new: true }).lean();
+    const updated = await roomModel.findByIdAndUpdate(id, { $set: setObj }, { new: true }).lean();
     if (updated) {
       try { rooms.set(String(updated._id), { id: String(updated._id), ...updated }); } catch (e) {}
       return res.json({ id: updated._id, ...updated });
@@ -981,12 +1046,17 @@ router.post('/dm', requireVerifiedForHighRisk, asyncHandler(async (req, res) => 
       $or: [{ type: 'dm' }, { type: 'private' }]
     };
     const filter = comboOr.length ? { $and: [baseFilter, { $or: comboOr }] } : baseFilter;
-    const existing = await Room.findOne(filter).sort({ updatedAt: -1, createdAt: -1 }).lean().exec();
 
-    if (existing && existing._id) {
-      // Keep in-memory cache lightly in sync
-      try { rooms.set(String(existing._id), { id: String(existing._id), ...existing }); } catch (e) {}
-      return res.json({ id: existing._id, ...existing });
+    const existingDm = await DMRoom.findOne(filter).sort({ updatedAt: -1, createdAt: -1 }).lean().exec();
+    if (existingDm && existingDm._id) {
+      try { rooms.set(String(existingDm._id), { id: String(existingDm._id), ...existingDm }); } catch (e) {}
+      return res.json({ id: existingDm._id, ...existingDm });
+    }
+
+    const existingLegacy = await Room.findOne(filter).sort({ updatedAt: -1, createdAt: -1 }).lean().exec();
+    if (existingLegacy && existingLegacy._id) {
+      try { rooms.set(String(existingLegacy._id), { id: String(existingLegacy._id), ...existingLegacy }); } catch (e) {}
+      return res.json({ id: existingLegacy._id, ...existingLegacy });
     }
   } catch (e) {
     // If lookup fails, fall through to creating a new DM
@@ -999,7 +1069,7 @@ router.post('/dm', requireVerifiedForHighRisk, asyncHandler(async (req, res) => 
 
   // persist
   try {
-    const doc = new Room({ _id: id, name: `DM:${participants[0]}:${participants[1]}`, type: 'private', category: 'dm', participants, members: participants, createdBy: requesterId });
+    const doc = new DMRoom({ _id: id, name: `DM:${participants[0]}:${participants[1]}`, type: 'private', category: 'dm', participants, members: participants, createdBy: requesterId });
     await doc.save();
   } catch (e) { console.warn('Could not persist DM room', e?.message || e); }
   rooms.set(id, room);
@@ -1021,7 +1091,7 @@ router.post('/random', requireVerifiedForHighRisk, async (req, res) => {
       const room = { id, type: 'private', category: 'dm', participants: [waiter.userId, userId] };
       // persist
       try {
-        const doc = new Room({ _id: id, name: `DM:${waiter.userId}:${userId}`, type: 'private', category: 'dm', participants: room.participants, members: room.participants, createdBy: waiter.userId });
+        const doc = new DMRoom({ _id: id, name: `DM:${waiter.userId}:${userId}`, type: 'private', category: 'dm', participants: room.participants, members: room.participants, createdBy: waiter.userId });
         await doc.save();
       } catch (e) { console.warn('Could not persist random DM room', e?.message || e); }
       rooms.set(id, room);
