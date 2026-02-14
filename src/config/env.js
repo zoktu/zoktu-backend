@@ -54,3 +54,7 @@ env.emailFrom = process.env.EMAIL_FROM || process.env.SMTP_USER || 'no-reply@loc
 if (!process.env.SMTP_ENABLED) {
   env.smtpEnabled = Boolean(env.smtpHost && env.smtpUser && env.smtpPass);
 }
+
+// Cloudflare Turnstile keys (set in your .env)
+env.turnstileSecret = process.env.TURNSTILE_SECRET || '';
+env.turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || '';

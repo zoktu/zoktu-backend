@@ -6,6 +6,7 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { users, guestUsernames, persistUserToDb, upsertUserInMemory } from '../lib/userStore.js';
 import User from '../models/User.js';
 import { containsProfanity } from '../middleware/profanityFilter.js';
+import { verifyTurnstile } from '../middleware/turnstile.js';
 import Session from '../models/Session.js';
 import { randomUUID } from 'crypto';
 import { assessIpRisk } from '../lib/ipRisk.js';
@@ -302,7 +303,7 @@ const validateGuestUsername = (username) => {
   return { valid: true, username: trimmed };
 };
 
-router.post('/signup', asyncHandler(async (req, res) => {
+router.post('/signup', verifyTurnstile, asyncHandler(async (req, res) => {
   const { email, password, displayName } = req.body;
   console.log('➡️ /api/auth/signup called', { email: !!email, hasAuthorization: !!req.headers.authorization });
   if (!email || !password) return res.status(400).json({ message: 'email and password required' });
@@ -534,7 +535,7 @@ router.post('/login', asyncHandler(async (req, res) => {
   res.json({ user: sanitizeUser(user), token, deletionRecovered: hadPendingDeletion, sessionId });
 }));
 
-router.post('/guest', asyncHandler(async (req, res) => {
+router.post('/guest', verifyTurnstile, asyncHandler(async (req, res) => {
   const { name } = req.body;
 
   // Validate username
