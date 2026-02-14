@@ -5,6 +5,7 @@ import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { users, guestUsernames, persistUserToDb, upsertUserInMemory } from '../lib/userStore.js';
 import User from '../models/User.js';
+import { containsProfanity } from '../middleware/profanityFilter.js';
 import Session from '../models/Session.js';
 import { randomUUID } from 'crypto';
 import { assessIpRisk } from '../lib/ipRisk.js';
@@ -319,6 +320,15 @@ router.post('/signup', asyncHandler(async (req, res) => {
 
   const hash = await bcrypt.hash(password, 10);
 
+  // Block profane/explicit display names
+  try {
+    if (containsProfanity(displayName || '')) {
+      return res.status(400).json({ message: 'Display name contains disallowed content' });
+    }
+  } catch (e) {
+    // fail-open on detection errors
+  }
+
   if (convertingGuest) {
     // Convert existing guest to registered while preserving displayName
     if (users.has(email)) return res.status(409).json({ message: 'email already in use' });
@@ -535,6 +545,15 @@ router.post('/guest', asyncHandler(async (req, res) => {
 
   const username = validation.username;
 
+  // Block profane/explicit usernames
+  try {
+    if (containsProfanity(username)) {
+      return res.status(400).json({ message: 'Username contains disallowed content' });
+    }
+  } catch (e) {
+    // fail-open
+  }
+
   // Quick in-memory check (fast-fail), but we must also use an atomic DB upsert
   if (guestUsernames.has(username.toLowerCase())) {
     return res.status(409).json({ message: 'Username already taken' });
@@ -630,6 +649,15 @@ router.get('/check-username', (req, res) => {
   const validation = validateGuestUsername(username);
   if (!validation.valid) {
     return res.status(400).json({ message: validation.error, available: false });
+  }
+
+  // Block profane/explicit usernames from availability checks
+  try {
+    if (containsProfanity(username)) {
+      return res.status(400).json({ message: 'Username contains disallowed content', available: false });
+    }
+  } catch (e) {
+    // fail-open
   }
 
   // Check if username exists (case-insensitive)

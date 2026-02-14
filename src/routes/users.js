@@ -4,6 +4,7 @@ import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { users, persistUserToDb } from '../lib/userStore.js';
 import User from '../models/User.js';
+import { containsProfanity } from '../middleware/profanityFilter.js';
 
 const router = Router();
 
@@ -400,6 +401,21 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   // Do not trust client-provided lastUsernameChange.
   const safeBody = { ...(req.body || {}) };
   delete safeBody.lastUsernameChange;
+
+  // Disallow profane content in profile fields like `bio`, `username`, `displayName`.
+  try {
+    if (typeof safeBody.bio === 'string' && containsProfanity(safeBody.bio)) {
+      return res.status(400).json({ message: 'Profile bio contains disallowed content' });
+    }
+    if (typeof safeBody.username === 'string' && containsProfanity(safeBody.username)) {
+      return res.status(400).json({ message: 'Username contains disallowed content' });
+    }
+    if (typeof safeBody.displayName === 'string' && containsProfanity(safeBody.displayName)) {
+      return res.status(400).json({ message: 'Display name contains disallowed content' });
+    }
+  } catch (e) {
+    // fail-open on detection errors
+  }
 
   const wantsClearPhoto =
     Object.prototype.hasOwnProperty.call(safeBody, 'photoURL') &&
