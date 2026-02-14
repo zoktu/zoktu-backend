@@ -4,7 +4,7 @@
 const DEFAULT_PROFANITY = [
   // English / common (romanized)
   'nude','nudity','nudes','porn','pornography','xxx','adult','sex','sexual','sexuality',
-  'fuck','fucked','fucking','fucker','fucks','cock','dick','pussy','boobs','tits','breasts','nipples',
+  'fuck','fucked','fucking','fucker','fucks','cock','dick','pussy','boobs','tits','breasts','nipples', 'horny','sexting','lesbian','gay',
   'anal','oral','blowjob','handjob','masturbate','masturbation','cum','semen','orgasm','chut','chutiya','chuti','chudai','chod','choda','gand','gaand','lund','lunda','land','lond','lundoo','bhenchod','madarchod','madar','maderchod','bhosdike','bhosadi','bhosdika','randi','randa','chodna','mutth','mutthi','mutth'
 ];
 
