@@ -45,7 +45,7 @@ const applyLeetMap = (s) => {
 const devanagariToLatin = (text) => {
   if (!text) return '';
   // quick bail: if no Devanagari chars, return original
-  if (!/\p{Devanagari}/u.test(text)) return String(text);
+  if (!/\p{Script=Devanagari}/u.test(text)) return String(text);
 
   const map = {
     'अ':'a','आ':'aa','इ':'i','ई':'ii','उ':'u','ऊ':'uu','ए':'e','ऐ':'ai','ओ':'o','औ':'au',
