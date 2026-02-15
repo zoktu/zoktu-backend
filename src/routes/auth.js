@@ -78,6 +78,13 @@ const getUserStorageKey = (user) => {
   return user.email || user.id || null;
 };
 
+// Simple endpoint for frontend to verify a Turnstile token and mark verification.
+// Frontend calls POST /api/auth/turnstile-verify with { turnstileToken }.
+router.post('/turnstile-verify', verifyTurnstile, asyncHandler(async (req, res) => {
+  // If middleware passes, token was valid (or verification is disabled in env).
+  return res.json({ success: true });
+}));
+
 const getRequestIp = (req) => {
   // prefer X-Forwarded-For when behind proxies
   const xff = req.headers['x-forwarded-for'];
