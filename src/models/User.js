@@ -11,7 +11,7 @@ const UserSchema = new mongoose.Schema({
   userType: { type: String, default: 'registered' },
   emailVerified: { type: Boolean, default: false },
   // Profile fields
-  bio: { type: String },
+  bio: { type: String, maxlength: 1000 },
   age: { type: Number },
   gender: { type: String },
   dob: { type: Date },

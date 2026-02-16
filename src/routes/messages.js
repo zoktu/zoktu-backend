@@ -917,7 +917,8 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
 
   // Profanity / explicit content check - block messages containing disallowed tokens
   try {
-    if (containsProfanity(content)) {
+    // Skip profanity enforcement for direct messages (DMs)
+    if (!isDmRoomDoc(roomDoc) && containsProfanity(content)) {
       return res.status(400).json({ message: 'Message contains disallowed content' });
     }
   } catch (e) {
@@ -1076,8 +1077,17 @@ router.patch('/messages/:id', asyncHandler(async (req, res) => {
 
   // Block edits that introduce profanity/explicit words
   try {
-    if (containsProfanity(content)) {
-      return res.status(400).json({ message: 'Message contains disallowed content' });
+    // Allow edits in DMs to bypass profanity enforcement; enforce only in non-DM rooms
+    try {
+      const roomForMsg = doc?.roomId ? await getRoomDocById(String(doc.roomId)) : null;
+      if (!isDmRoomDoc(roomForMsg) && containsProfanity(content)) {
+        return res.status(400).json({ message: 'Message contains disallowed content' });
+      }
+    } catch (innerErr) {
+      // if room lookup fails, fall back to conservative check
+      if (containsProfanity(content)) {
+        return res.status(400).json({ message: 'Message contains disallowed content' });
+      }
     }
   } catch (e) {
     // fail-open on detection errors

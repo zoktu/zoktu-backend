@@ -417,6 +417,11 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     // fail-open on detection errors
   }
 
+  // Enforce bio length server-side to match frontend (1000 chars)
+  if (typeof safeBody.bio === 'string' && safeBody.bio.length > 1000) {
+    return res.status(400).json({ message: 'Profile bio must be 1000 characters or less' });
+  }
+
   const wantsClearPhoto =
     Object.prototype.hasOwnProperty.call(safeBody, 'photoURL') &&
     (safeBody.photoURL === null || String(safeBody.photoURL).trim() === '');
