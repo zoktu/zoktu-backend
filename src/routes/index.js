@@ -12,6 +12,7 @@ import uploadsRoutes from './uploads.js';
 import reportsRoutes from './reports.js';
 import sessionsRoutes from './sessions.js';
 import notificationsRoutes from './notifications.js';
+import paymentsRoutes from './payments.js';
 
 const router = Router();
 
@@ -28,5 +29,6 @@ router.use('/uploads', uploadsRoutes);
 router.use('/reports', reportsRoutes);
 router.use('/sessions', sessionsRoutes);
 router.use('/notifications', notificationsRoutes);
+router.use('/payments', paymentsRoutes);
 
 export default router;

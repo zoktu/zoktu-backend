@@ -58,3 +58,11 @@ if (!process.env.SMTP_ENABLED) {
 // Cloudflare Turnstile keys (set in your .env)
 env.turnstileSecret = process.env.TURNSTILE_SECRET || '';
 env.turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || '';
+
+// Cashfree payment gateway configuration
+env.cashfreeAppId = process.env.CASHFREE_APP_ID || '';
+env.cashfreeSecret = process.env.CASHFREE_SECRET || '';
+// 'PROD' or 'TEST' (sandbox)
+env.cashfreeEnv = (process.env.CASHFREE_ENV || 'TEST').toUpperCase();
+// URL where Cashfree will redirect after payment (set to your frontend callback)
+env.cashfreeReturnUrl = process.env.CASHFREE_RETURN_URL || '';

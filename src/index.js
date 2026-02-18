@@ -18,7 +18,8 @@ import User from './models/User.js';
 
 const app = express();
 
-app.use(cors({ origin: env.clientOrigin, credentials: true }));
+// Allow stricter CORS in production, but permit any origin during development
+app.use(cors({ origin: env.nodeEnv === 'production' ? env.clientOrigin : true, credentials: true }));
 app.use(helmet());
 // HTTP response compression (gzip/brotli where supported)
 app.use(compression());

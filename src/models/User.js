@@ -54,6 +54,15 @@ const UserSchema = new mongoose.Schema({
   // Presence
   isOnline: { type: Boolean, default: false },
   lastSeen: { type: Date },
+  // Premium / subscription
+  isPremium: { type: Boolean, default: false },
+  premiumUntil: { type: Date },
+  subscription: {
+    provider: { type: String },
+    orderId: { type: String },
+    plan: { type: String },
+    amount: { type: String }
+  },
   resetToken: String,
   resetTokenExpires: Number,
   emailVerificationToken: String,
