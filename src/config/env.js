@@ -66,3 +66,6 @@ env.cashfreeSecret = process.env.CASHFREE_SECRET || '';
 env.cashfreeEnv = (process.env.CASHFREE_ENV || 'TEST').toUpperCase();
 // URL where Cashfree will redirect after payment (set to your frontend callback)
 env.cashfreeReturnUrl = process.env.CASHFREE_RETURN_URL || '';
+// Optional overrides for pricing (useful for temporary live tests)
+env.cashfreeForcePriceMonthly = process.env.CASHFREE_FORCE_PRICE_MONTHLY || '';
+env.cashfreeForcePriceYearly = process.env.CASHFREE_FORCE_PRICE_YEARLY || '';

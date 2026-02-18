@@ -30,7 +30,17 @@ router.post('/create-order', requireAuth, async (req, res) => {
     if (!plan || !['monthly', 'yearly'].includes(plan)) return res.status(400).json({ message: 'plan required: monthly or yearly' });
 
     // Server-side price mapping (INR)
-    const PRICES = { monthly: '49', yearly: '540' };
+    // Use very small amounts in TEST env so you can validate flows without charging real amounts
+    const defaultTestPrices = { monthly: '1', yearly: '10' };
+    const defaultProdPrices = { monthly: '49', yearly: '540' };
+    // Allow override via environment (useful to temporarily charge a different amount in production)
+    const forcedMonthly = env.cashfreeForcePriceMonthly || '';
+    const forcedYearly = env.cashfreeForcePriceYearly || '';
+    const PRICES = env.cashfreeEnv === 'TEST'
+      ? { ...defaultTestPrices }
+      : { ...defaultProdPrices };
+    if (forcedMonthly) PRICES.monthly = String(forcedMonthly);
+    if (forcedYearly) PRICES.yearly = String(forcedYearly);
     const amount = PRICES[plan];
 
     // Build customer details from authenticated user (prevent client tampering)
@@ -46,11 +56,14 @@ router.post('/create-order', requireAuth, async (req, res) => {
       customer_phone: resolvedPhone || '9999999999'
     };
 
+    // include plan in the return URL so the redirect handler knows which plan to grant
+    const returnUrlWithPlan = (env.cashfreeReturnUrl || '').replace(/\/?$/, '') + `?plan=${encodeURIComponent(plan)}`;
+
     const request = {
       order_amount: String(amount),
       order_currency: 'INR',
       customer_details,
-      order_meta: { return_url: env.cashfreeReturnUrl || '', ...(req.body.order_meta || {}) },
+      order_meta: { return_url: returnUrlWithPlan, ...(req.body.order_meta || {}) },
       order_note: `Subscription ${plan}`
     };
 
@@ -99,10 +112,22 @@ router.get('/return', async (req, res) => {
     // If paid, find user by customer_id (expected to be passed in create-order's customer_details.customer_id)
     if (status === 'PAID') {
       const customerId = data.customer_details?.customer_id;
+      // determine plan: prefer explicit plan query param, fall back to order_note parsing
+      const planFromQuery = req.query.plan || req.query.plans;
+      let planToGrant = planFromQuery || '';
+      if (!planToGrant && typeof data.order_note === 'string') {
+        if (/monthly/i.test(data.order_note)) planToGrant = 'monthly';
+        else if (/yearly/i.test(data.order_note)) planToGrant = 'yearly';
+      }
+      if (!planToGrant) planToGrant = 'monthly'; // default
+
       if (customerId) {
         const user = await User.findOne({ $or: [{ _id: customerId }, { guestId: customerId }, { email: customerId }] }).lean();
         if (user) {
-          const premiumUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+          // grant duration based on plan
+          const now = Date.now();
+          const durations = { monthly: 30 * 24 * 60 * 60 * 1000, yearly: 365 * 24 * 60 * 60 * 1000 };
+          const premiumUntil = new Date(now + (durations[planToGrant] || durations.monthly));
           await User.findByIdAndUpdate(user._id, {
             $set: {
               isPremium: true,
@@ -110,7 +135,7 @@ router.get('/return', async (req, res) => {
               subscription: {
                 provider: 'cashfree',
                 orderId: String(order_id),
-                plan: 'premium',
+                plan: planToGrant,
                 amount: String(data.order_amount || data.amount || '')
               }
             }
