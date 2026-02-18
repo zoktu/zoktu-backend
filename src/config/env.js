@@ -66,3 +66,5 @@ env.cashfreeSecret = process.env.CASHFREE_SECRET || '';
 env.cashfreeEnv = (process.env.CASHFREE_ENV || 'TEST').toUpperCase();
 // URL where Cashfree will redirect after payment (set to your frontend callback)
 env.cashfreeReturnUrl = process.env.CASHFREE_RETURN_URL || '';
+// Optional admin secret for privileged payment actions (refunds)
+env.adminSecret = process.env.ADMIN_SECRET || '';
