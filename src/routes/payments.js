@@ -35,10 +35,15 @@ router.post('/create-order', requireAuth, async (req, res) => {
 
     // Build customer details from authenticated user (prevent client tampering)
     const customerId = req.user?.id || req.user?._id || req.user?.userId || null;
+    // Prefer phone from authenticated user/profile or request; fall back to a safe dummy
+    const resolvedPhone = req.user?.phone || req.user?.phoneNumber || req.body?.customer_phone || '';
+    if (!resolvedPhone) {
+      console.warn('payments:create-order - customer phone missing; using fallback phone');
+    }
     const customer_details = {
       customer_id: customerId || `guest_${Date.now()}`,
       customer_email: req.user?.email || req.body?.customer_email || '',
-      customer_phone: req.body?.customer_phone || ''
+      customer_phone: resolvedPhone || '9999999999'
     };
 
     const request = {
