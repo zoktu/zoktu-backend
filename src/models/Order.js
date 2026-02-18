@@ -9,6 +9,8 @@ const OrderSchema = new mongoose.Schema({
   customerId: { type: String },
   customerEmail: { type: String },
   customerPhone: { type: String },
+  // whether the user consented to save this phone to their profile
+  savePhoneConsent: { type: Boolean, default: false },
   username: { type: String },
   idempotencyKey: { type: String, index: true, sparse: true },
   plan: { type: String },

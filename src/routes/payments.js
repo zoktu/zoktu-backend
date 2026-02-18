@@ -87,6 +87,9 @@ router.post('/create-order', requireAuth, async (req, res) => {
     }
 
     // Persist order for reconciliation
+    // whether user consented to save phone to profile (optional)
+    const savePhoneConsent = Boolean(req.body?.save_phone || false);
+
     try {
       const od = resp.data || {};
       const orderDoc = new Order({
@@ -98,6 +101,7 @@ router.post('/create-order', requireAuth, async (req, res) => {
         customerId: String(customer_details.customer_id || ''),
         customerEmail: String(customer_details.customer_email || ''),
         customerPhone: String(customer_details.customer_phone || ''),
+        savePhoneConsent: savePhoneConsent,
         username: String(request.order_meta?.username || ''),
         idempotencyKey: idemKey ? String(idemKey) : undefined,
         plan: plan,
@@ -152,17 +156,26 @@ router.get('/return', async (req, res) => {
         const user = await User.findOne({ $or: [{ _id: customerId }, { guestId: customerId }, { email: customerId }] }).exec();
         if (user) {
           const premiumUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
-          await User.findByIdAndUpdate(user._id, {
-            $set: {
-              isPremium: true,
-              premiumUntil,
-              subscription: {
-                provider: 'cashfree',
-                orderId: String(order_id),
-                plan: 'premium',
-                amount: String(data.order_amount || data.amount || '')
-              }
+          // If the order document indicates the user consented to save phone, fetch it and update
+          let updateObj = {
+            isPremium: true,
+            premiumUntil,
+            subscription: {
+              provider: 'cashfree',
+              orderId: String(order_id),
+              plan: 'premium',
+              amount: String(data.order_amount || data.amount || '')
             }
+          };
+          try {
+            const ord = await Order.findOne({ orderId: String(order_id) }).lean().exec();
+            if (ord?.savePhoneConsent && ord?.customerPhone) {
+              updateObj = { ...updateObj, phone: ord.customerPhone };
+            }
+          } catch (e) {}
+
+          await User.findByIdAndUpdate(user._id, {
+            $set: updateObj
           }).exec();
 
           // Send confirmation email
@@ -254,13 +267,17 @@ router.post('/webhook', async (req, res) => {
           const user = await User.findOne({ $or: [{ _id: customerId }, { guestId: customerId }, { email: customerId }] }).exec();
           if (user) {
             const premiumUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-            await User.findByIdAndUpdate(user._id, {
-              $set: {
-                isPremium: true,
-                premiumUntil,
-                subscription: { provider: 'cashfree', orderId: String(orderId), plan: ord?.plan || 'premium', amount: ord?.amount || '' }
-              }
-            }).exec();
+            // Save phone to profile only if user consented during checkout
+            let updateObj = {
+              isPremium: true,
+              premiumUntil,
+              subscription: { provider: 'cashfree', orderId: String(orderId), plan: ord?.plan || 'premium', amount: ord?.amount || '' }
+            };
+            try {
+              if (ord?.savePhoneConsent && ord?.customerPhone) updateObj = { ...updateObj, phone: ord.customerPhone };
+            } catch (e) {}
+
+            await User.findByIdAndUpdate(user._id, { $set: updateObj }).exec();
 
             // send confirmation email
             try {
