@@ -505,8 +505,25 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
 }));
 
 router.post('/login', asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
-  const lookup = users.get(email);
+  const { email: identifier, password } = req.body;
+
+  if (!identifier || !password) return res.status(400).json({ message: 'email and password required' });
+
+  // Primary fast lookup by the provided identifier (frontend still posts into `email` field)
+  let lookup = users.get(identifier);
+
+  // If not found, attempt case-insensitive search across common identifiers
+  if (!lookup) {
+    const normalized = String(identifier || '').trim().toLowerCase();
+    lookup = Array.from(users.values()).find((u) => {
+      return (u.email || '').toLowerCase() === normalized ||
+             (u.displayName || '').toLowerCase() === normalized ||
+             (u.username || '').toLowerCase() === normalized ||
+             String(u.id) === normalized ||
+             String(u.guestId || '').toLowerCase() === normalized;
+    }) || null;
+  }
+
   if (!lookup) return res.status(401).json({ message: 'invalid credentials' });
 
   const { user, expired } = enforceDeletionWindow(lookup);
