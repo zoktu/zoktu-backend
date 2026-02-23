@@ -6,7 +6,6 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { users, guestUsernames, persistUserToDb, upsertUserInMemory } from '../lib/userStore.js';
 import User from '../models/User.js';
 import { containsProfanity } from '../middleware/profanityFilter.js';
-import { verifyTurnstile } from '../middleware/turnstile.js';
 import Session from '../models/Session.js';
 import { randomUUID } from 'crypto';
 import { assessIpRisk } from '../lib/ipRisk.js';
@@ -80,8 +79,8 @@ const getUserStorageKey = (user) => {
 
 // Simple endpoint for frontend to verify a Turnstile token and mark verification.
 // Frontend calls POST /api/auth/turnstile-verify with { turnstileToken }.
-router.post('/turnstile-verify', verifyTurnstile, asyncHandler(async (req, res) => {
-  // If middleware passes, token was valid (or verification is disabled in env).
+// Legacy route retained for compatibility; verification is disabled.
+router.post('/turnstile-verify', asyncHandler(async (req, res) => {
   return res.json({ success: true });
 }));
 
@@ -310,7 +309,7 @@ const validateGuestUsername = (username) => {
   return { valid: true, username: trimmed };
 };
 
-router.post('/signup', verifyTurnstile, asyncHandler(async (req, res) => {
+router.post('/signup', asyncHandler(async (req, res) => {
   const { email, password, displayName } = req.body;
   console.log('➡️ /api/auth/signup called', { email: !!email, hasAuthorization: !!req.headers.authorization });
   if (!email || !password) return res.status(400).json({ message: 'email and password required' });
@@ -559,7 +558,7 @@ router.post('/login', asyncHandler(async (req, res) => {
   res.json({ user: sanitizeUser(user), token, deletionRecovered: hadPendingDeletion, sessionId });
 }));
 
-router.post('/guest', verifyTurnstile, asyncHandler(async (req, res) => {
+router.post('/guest', asyncHandler(async (req, res) => {
   const { name } = req.body;
 
   // Validate username
