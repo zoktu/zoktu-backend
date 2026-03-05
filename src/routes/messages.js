@@ -1257,31 +1257,27 @@ router.delete('/messages/:id', asyncHandler(async (req, res) => {
 
   if (!isSender && !isModerator) return res.status(403).json({ message: 'Forbidden' });
 
-  // For DM rooms: soft-delete so both sides see "Message deleted" (instead of disappearing).
+  // Soft-delete so all clients see "Message deleted" via polling.
   try {
-    const roomDoc = await getRoomDocById(String(doc.roomId));
-    const isDmByModel = Boolean(Model && DMMessage && Model === DMMessage);
-    if (isDmByModel || isDmRoomDoc(roomDoc)) {
-      const meta = doc.meta || {};
-      meta.deleted = true;
-      meta.deletedAt = new Date();
-      meta.deletedBy = String(auth.primary);
-      doc.meta = meta;
-      doc.content = '';
-      await doc.save();
+    const meta = doc.meta || {};
+    meta.deleted = true;
+    meta.deletedAt = new Date();
+    meta.deletedBy = String(auth.primary);
+    doc.meta = meta;
+    doc.content = '';
+    await doc.save();
 
-      // Best-effort: keep in-memory cache consistent if it exists
-      try {
-        const list = messages.get(String(doc.roomId)) || [];
-        const idx = list.findIndex(m => String(m.id) === String(id));
-        if (idx !== -1) {
-          list[idx] = { ...list[idx], content: '', meta: { ...(list[idx].meta || {}), deleted: true, deletedAt: meta.deletedAt, deletedBy: meta.deletedBy } };
-          messages.set(String(doc.roomId), list);
-        }
-      } catch (e) {}
+    // Best-effort: keep in-memory cache consistent if it exists
+    try {
+      const list = messages.get(String(doc.roomId)) || [];
+      const idx = list.findIndex(m => String(m.id) === String(id));
+      if (idx !== -1) {
+        list[idx] = { ...list[idx], content: '', meta: { ...(list[idx].meta || {}), deleted: true, deletedAt: meta.deletedAt, deletedBy: meta.deletedBy } };
+        messages.set(String(doc.roomId), list);
+      }
+    } catch (e) {}
 
-      return res.json({ message: 'deleted', id, soft: true });
-    }
+    return res.json({ message: 'deleted', id, soft: true });
   } catch (e) {
     // fall through to hard-delete
   }
