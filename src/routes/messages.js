@@ -38,6 +38,37 @@ const BOT_ENABLED = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').t
 const botLastReplyByRoom = new Map();
 const BOT_UNSAFE_PATTERN = /(kill yourself|self-harm|suicide|rape|terrorist|nazi)/i;
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const getDisappearingDurationMs = (roomDoc) => {
+  try {
+    const cfg = roomDoc?.settings?.disappearingMessages;
+    if (!cfg || cfg.enabled !== true) return null;
+    const days = Number(cfg.duration || 0);
+    if (!Number.isFinite(days) || days <= 0) return null;
+    return days * DAY_MS;
+  } catch (e) {
+    return null;
+  }
+};
+
+const pruneExpiredDisappearingMessages = async ({ Model, roomId, roomDoc }) => {
+  try {
+    const durationMs = getDisappearingDurationMs(roomDoc);
+    if (!durationMs) return;
+    const cutoff = new Date(Date.now() - durationMs);
+
+    await Model.deleteMany({
+      roomId: String(roomId),
+      createdAt: { $lt: cutoff },
+      type: { $ne: 'system' },
+      'meta.pinned': { $ne: true }
+    }).exec();
+  } catch (e) {
+    // best-effort
+  }
+};
+
 const getRoomDocById = async (id, select = null) => {
   if (!id) return null;
   const preferDm = String(id).startsWith('dm-');
@@ -631,10 +662,21 @@ router.get('/rooms/:roomId/messages', (req, res) => {
     try {
       const roomDoc = await getRoomDocById(roomId);
       const Model = getModelForRoom(roomDoc);
+      await pruneExpiredDisappearingMessages({ Model, roomId, roomDoc });
+
       const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
       const before = req.query.before; // cursor for pagination (messageId or timestamp)
+      const durationMs = getDisappearingDurationMs(roomDoc);
+      const cutoff = durationMs ? new Date(Date.now() - durationMs) : null;
 
       let query = { roomId };
+      if (cutoff) {
+        query.$or = [
+          { createdAt: { $gte: cutoff } },
+          { type: 'system' },
+          { 'meta.pinned': true }
+        ];
+      }
       if (before) {
         // Fetch messages older than the cursor
         try {
@@ -1045,6 +1087,7 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     auth
   });
 
+  await pruneExpiredDisappearingMessages({ Model, roomId, roomDoc });
   await pruneRoomMessages({ roomDoc, roomId, Model });
   if (await shouldBotReply(roomDoc, senderIdEffective, content, req.body?.type, replyTo)) {
     botLastReplyByRoom.set(String(roomId), Date.now());
