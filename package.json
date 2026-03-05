@@ -8,6 +8,7 @@
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
     "seed-system": "node scripts/seed-system-room.js",
+    "migrate:encrypt-messages": "node scripts/encrypt-message-content.js",
     "lint": "echo \"add linter\""
   },
   "dependencies": {
