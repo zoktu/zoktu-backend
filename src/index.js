@@ -15,6 +15,7 @@ import Message from './models/Message.js';
 import Room from './models/Room.js';
 import DMRoom from './models/DMRoom.js';
 import User from './models/User.js';
+import { containsBlockedExternalLink } from './middleware/profanityFilter.js';
 
 const app = express();
 
@@ -306,6 +307,16 @@ io.on('connection', (socket) => {
     try {
       const { roomId, senderId, senderName, content } = payload || {};
       if (!roomId || !content) return;
+
+      // Allow only zoktu.com links; block other external links.
+      try {
+        if (containsBlockedExternalLink(content)) {
+          socket.emit('message:error', { message: 'Message removed: external links are not allowed (only zoktu.com allowed)' });
+          return;
+        }
+      } catch (e) {
+        // fail-open
+      }
 
       // word limit
       const words = (content || '').trim().split(/\s+/).filter(Boolean).length;

@@ -153,4 +153,57 @@ export const containsProfanity = (text) => {
   return false;
 };
 
+const ALLOWED_LINK_HOSTS = new Set(['zoktu.com', 'www.zoktu.com']);
+
+const normalizeHost = (raw) => {
+  if (!raw) return '';
+  const host = String(raw).toLowerCase().trim().replace(/\u0000/g, '');
+  return host.replace(/:\d+$/, '');
+};
+
+const isAllowedHost = (host) => {
+  const normalized = normalizeHost(host);
+  if (!normalized) return false;
+  if (ALLOWED_LINK_HOSTS.has(normalized)) return true;
+  return normalized.endsWith('.zoktu.com');
+};
+
+const extractLinkCandidates = (text) => {
+  const input = String(text || '');
+  if (!input.trim()) return [];
+
+  const out = [];
+  const rx = /(?:https?:\/\/[^\s]+)|(?:www\.[^\s]+)|(?:\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}(?:\/[^\s]*)?\b)/gi;
+  let match = null;
+  while ((match = rx.exec(input)) !== null) {
+    const v = String(match[0] || '').trim();
+    if (v) out.push(v);
+  }
+  return out;
+};
+
+const tryGetHostname = (candidate) => {
+  const raw = String(candidate || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    return normalizeHost(url.hostname || '');
+  } catch (e) {
+    return '';
+  }
+};
+
+// Returns true when text contains a link that is not zoktu.com (or its subdomains).
+export const containsBlockedExternalLink = (text) => {
+  const links = extractLinkCandidates(text);
+  if (!links.length) return false;
+
+  for (const link of links) {
+    const host = tryGetHostname(link);
+    if (!host) continue;
+    if (!isAllowedHost(host)) return true;
+  }
+
+  return false;
+};
 export default containsProfanity;

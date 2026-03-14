@@ -10,7 +10,7 @@ import DMRoom from '../models/DMRoom.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
-import { containsProfanity } from '../middleware/profanityFilter.js';
+import { containsProfanity, containsBlockedExternalLink } from '../middleware/profanityFilter.js';
 import { encryptMessageContent, decryptMessageContent } from '../lib/messageCrypto.js';
 
 const router = Router();
@@ -878,6 +878,15 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     return res.status(400).json({ message: `Message too long (max ${MAX_WORDS} words)` });
   }
 
+  // Allow only zoktu.com links. Any external links are blocked.
+  try {
+    if (containsBlockedExternalLink(content)) {
+      return res.status(400).json({ message: 'Message removed: external links are not allowed (only zoktu.com allowed)' });
+    }
+  } catch (e) {
+    // fail-open
+  }
+
   // Duplicate message spam check (block same message sent repeatedly in short interval)
   try {
     const Model = getModelForRoom(await getRoomDocById(roomId));
@@ -1120,6 +1129,15 @@ router.patch('/messages/:id', asyncHandler(async (req, res) => {
 
   const content = (req.body?.content ?? req.body?.message ?? '').toString();
   if (!content.trim()) return res.status(400).json({ message: 'content required' });
+
+  // Block edits that introduce external links.
+  try {
+    if (containsBlockedExternalLink(content)) {
+      return res.status(400).json({ message: 'Message removed: external links are not allowed (only zoktu.com allowed)' });
+    }
+  } catch (e) {
+    // fail-open
+  }
 
   // Block edits that introduce profanity/explicit words
   try {
