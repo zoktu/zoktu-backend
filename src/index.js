@@ -18,8 +18,36 @@ import User from './models/User.js';
 
 const app = express();
 
-// Allow stricter CORS in production, but permit any origin during development
-app.use(cors({ origin: env.nodeEnv === 'production' ? env.clientOrigin : true, credentials: true }));
+const buildAllowedOrigins = () => {
+  const raw = String(env.clientOrigin || '').trim();
+  const fromEnv = raw
+    ? raw.split(',').map((s) => s.trim()).filter(Boolean)
+    : [];
+
+  const defaults = [
+    'https://zoktu.com',
+    'https://www.zoktu.com',
+    'http://localhost:8080',
+    'http://localhost:5173'
+  ];
+
+  return Array.from(new Set([...defaults, ...fromEnv]));
+};
+
+const allowedOrigins = buildAllowedOrigins();
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (env.nodeEnv !== 'production') return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  credentials: true
+};
+
+// Allow stricter CORS in production, but permit known frontend origins.
+app.use(cors(corsOptions));
 app.use(helmet());
 // HTTP response compression (gzip/brotli where supported)
 app.use(compression());
@@ -46,7 +74,7 @@ app.use(errorHandler);
 // HTTP server + socket.io for real-time pairing/messaging
 const httpServer = createServer(app);
 const io = new IOServer(httpServer, {
-  cors: { origin: env.clientOrigin, methods: ['GET', 'POST'] }
+  cors: { origin: allowedOrigins, methods: ['GET', 'POST'] }
 });
 
 // Simple in-memory socket registries and waiting queue for random pairing
