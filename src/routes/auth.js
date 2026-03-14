@@ -656,7 +656,7 @@ router.post('/guest', asyncHandler(async (req, res) => {
           userType: 'guest',
           createdAt: now
         },
-        $set: { lastIp: getRequestIp(req) }
+        $set: { lastIp: getRequestIp(req), isOnline: true, lastSeen: null }
       },
       { upsert: true, new: true }
     ).lean().exec();
@@ -664,17 +664,21 @@ router.post('/guest', asyncHandler(async (req, res) => {
     // Build the in-memory user object
     const user = {
       id: saved.guestId || String(saved._id),
+      guestId: saved.guestId || String(saved._id),
       email: '',
       username: saved.username || saved.displayName,
       displayName: saved.displayName,
+      name: saved.displayName,
       userType: 'guest',
+      isOnline: true,
+      lastSeen: null,
       createdAt: saved.createdAt
     };
 
     // update in-memory maps
     try { user.lastIp = getRequestIp(req); await persistUserToDb(user); } catch (e) {}
     guestUsernames.set(username.toLowerCase(), user.id);
-    users.set(user.id, user);
+    upsertUserInMemory(user);
 
     const sessionId = await createSessionForUser(user.id, req);
     if (!sessionId) {
@@ -690,9 +694,19 @@ router.post('/guest', asyncHandler(async (req, res) => {
     console.warn('⚠️ Failed to persist guest user', e?.message || e);
     // Fall back to in-memory guest (non-persistent)
     const fallbackId = `guest-${Date.now()}`;
-    const user = { id: fallbackId, email: '', username, displayName: username, userType: 'guest' };
+    const user = {
+      id: fallbackId,
+      guestId: fallbackId,
+      email: '',
+      username,
+      displayName: username,
+      name: username,
+      userType: 'guest',
+      isOnline: true,
+      lastSeen: null
+    };
     guestUsernames.set(username.toLowerCase(), user.id);
-    users.set(user.id, user);
+    upsertUserInMemory(user);
     const sessionId = await createSessionForUser(user.id, req);
     if (!sessionId) {
       return res.status(500).json({ message: 'Unable to create session' });

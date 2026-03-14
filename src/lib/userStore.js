@@ -11,11 +11,13 @@ export function updateUserPresenceInMemory(userId, isOnline) {
   const nextIsOnline = Boolean(isOnline);
   const nextLastSeen = nextIsOnline ? undefined : new Date();
 
+  let matchedAny = false;
   for (const [key, value] of users.entries()) {
     if (!value) continue;
     const entryId = value.id || value._id || '';
     const entryGuestId = value.guestId || '';
     if (String(entryId) !== id && String(entryGuestId) !== id) continue;
+    matchedAny = true;
 
     const updated = {
       ...value,
@@ -23,6 +25,21 @@ export function updateUserPresenceInMemory(userId, isOnline) {
       ...(nextLastSeen ? { lastSeen: nextLastSeen } : {})
     };
     users.set(key, updated);
+  }
+
+  // If this id is not yet in-memory but is now online, add a minimal entry
+  // so /users?online=true can immediately include it.
+  if (!matchedAny && nextIsOnline) {
+    const fallback = {
+      id,
+      guestId: id,
+      displayName: id,
+      name: id,
+      username: id,
+      userType: 'guest',
+      isOnline: true
+    };
+    users.set(id, fallback);
   }
 }
 

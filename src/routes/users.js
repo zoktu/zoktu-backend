@@ -10,18 +10,42 @@ const router = Router();
 
 const uniqStrings = (arr) => Array.from(new Set((arr || []).filter(Boolean).map((v) => String(v))));
 
+const isUserOnline = (u) => {
+  const v = u?.isOnline;
+  return v === true || v === 'true' || v === 1 || v === '1';
+};
+
 const uniqUsers = (list) => {
-  const seen = new Set();
-  const out = [];
+  const byKey = new Map();
   for (const u of list || []) {
     if (!u) continue;
     const key = String(u.id || u.guestId || u._id || u.email || u.displayName || '').trim();
     if (!key) continue;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(u);
+
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, u);
+      continue;
+    }
+
+    // Prefer an online snapshot over an offline duplicate.
+    const prevOnline = Boolean(prev?.isOnline);
+    const nextOnline = Boolean(u?.isOnline);
+
+    if (!prevOnline && nextOnline) {
+      byKey.set(key, { ...prev, ...u, isOnline: true });
+      continue;
+    }
+
+    if (prevOnline && !nextOnline) {
+      byKey.set(key, { ...u, ...prev, isOnline: true });
+      continue;
+    }
+
+    // If both have same online status, keep the richer merged object.
+    byKey.set(key, { ...prev, ...u, isOnline: prevOnline || nextOnline });
   }
-  return out;
+  return Array.from(byKey.values());
 };
 
 const matchesSearch = (u, termLower) => {
@@ -102,14 +126,28 @@ const filterUserForViewer = ({ viewerIds, user }) => {
 
 // Return all users known in-memory (seeded from DB at startup)
 router.get('/', asyncHandler(async (req, res) => {
-  const raw = Array.from(users.values());
+  const online = req.query?.online;
+  let raw = Array.from(users.values());
+
+  // For online listings, also merge DB-backed users to avoid in-memory drift.
+  if (online === true || online === 'true' || online === 1 || online === '1') {
+    try {
+      const onlineDocs = await User.find({ isOnline: true }).lean().exec().catch(() => []);
+      const normalized = (onlineDocs || []).map((doc) => ({
+        ...doc,
+        id: String(doc?.guestId || doc?._id || '')
+      }));
+      raw = [...raw, ...normalized];
+    } catch (e) {
+      // ignore DB fallback failures
+    }
+  }
+
   const unique = uniqUsers(raw);
 
   const viewerIds = await getViewerIdsFromReq(req);
 
   const search = (req.query?.search || '').toString().trim();
-  const online = req.query?.online;
-
   // Resolve "me" from Authorization (best-effort) so we can exclude it from search results.
   let meEmail = null;
   let meId = null;
@@ -142,7 +180,7 @@ router.get('/', asyncHandler(async (req, res) => {
 
   // Optional: filter online users
   if (online === true || online === 'true' || online === 1 || online === '1') {
-    return res.json(unique.filter((u) => u && u.isOnline).map((u) => filterUserForViewer({ viewerIds, user: u })));
+    return res.json(unique.filter((u) => isUserOnline(u)).map((u) => filterUserForViewer({ viewerIds, user: u })));
   }
 
   res.json(unique.map((u) => filterUserForViewer({ viewerIds, user: u })));
