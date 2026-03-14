@@ -29,8 +29,23 @@ export const env = {
   botId: process.env.BOT_ID || 'bot-baka',
   botAvatar: process.env.BOT_AVATAR || process.env.BOT_AVATAR_URL || '',
   botEnabled: process.env.BOT_ENABLED || '',
-  botReplyCooldownMs: process.env.BOT_REPLY_COOLDOWN_MS || ''
+  botReplyCooldownMs: process.env.BOT_REPLY_COOLDOWN_MS || '',
+  // IP risk detection provider settings
+  ipIntelProvider: process.env.IPINTEL_PROVIDER || '',
+  ipIntelKey: process.env.IPINTEL_KEY || '',
+  maxmindDbPath: process.env.MAXMIND_DB_PATH || '',
+  ipIntelStrictness: process.env.IPINTEL_STRICTNESS || '1',
+  ipIntelAllowPublicAccessPoints: process.env.IPINTEL_ALLOW_PUBLIC_ACCESS_POINTS || 'true',
+  ipIntelFraudBlockScore: process.env.IPINTEL_FRAUD_BLOCK_SCORE || '85'
 };
+
+// Backward-compatible aliases used in existing code.
+env.IPINTEL_PROVIDER = env.ipIntelProvider;
+env.IPINTEL_KEY = env.ipIntelKey;
+env.MAXMIND_DB_PATH = env.maxmindDbPath;
+env.IPINTEL_STRICTNESS = env.ipIntelStrictness;
+env.IPINTEL_ALLOW_PUBLIC_ACCESS_POINTS = env.ipIntelAllowPublicAccessPoints;
+env.IPINTEL_FRAUD_BLOCK_SCORE = env.ipIntelFraudBlockScore;
 
 // Redis URL for pub/sub and queues
 env.redisUrl = process.env.REDIS_URL || process.env.REDIS_URI || '';

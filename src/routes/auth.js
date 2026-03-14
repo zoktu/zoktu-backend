@@ -85,12 +85,24 @@ router.post('/turnstile-verify', asyncHandler(async (req, res) => {
 }));
 
 const getRequestIp = (req) => {
+  const cfIp = req.headers['cf-connecting-ip'];
+  if (cfIp && typeof cfIp === 'string') {
+    return cfIp.trim();
+  }
+
+  const realIp = req.headers['x-real-ip'];
+  if (realIp && typeof realIp === 'string') {
+    return realIp.trim();
+  }
+
   // prefer X-Forwarded-For when behind proxies
   const xff = req.headers['x-forwarded-for'];
   if (xff && typeof xff === 'string') {
     return xff.split(',')[0].trim();
   }
-  return req.ip || req.connection?.remoteAddress || null;
+
+  const rawIp = req.ip || req.connection?.remoteAddress || null;
+  return typeof rawIp === 'string' ? rawIp.replace('::ffff:', '') : rawIp;
 };
 
 const resolveClientOrigin = () => {
@@ -105,11 +117,15 @@ const buildRestrictedUrl = () => `${resolveClientOrigin().replace(/\/$/, '')}/ac
 // Public pre-auth risk check for login/register pages.
 router.get('/risk-check', asyncHandler(async (req, res) => {
   const ip = getRequestIp(req);
-  const riskInfo = await assessIpRisk(ip).catch(() => ({ risk: false }));
+  const riskInfo = await assessIpRisk(ip, {
+    userAgent: req.headers['user-agent'] || '',
+    userLanguage: req.headers['accept-language'] || ''
+  }).catch(() => ({ risk: false }));
   const blocked = Boolean(riskInfo?.risk);
 
   return res.json({
     blocked,
+    score: riskInfo?.score || 0,
     redirectUrl: blocked ? buildRestrictedUrl() : null,
     reason: blocked ? (riskInfo?.reason || 'vpn/proxy/tor') : null
   });
@@ -262,7 +278,10 @@ const createSessionForUser = async (userId, req) => {
     }
     const sessionId = (typeof randomUUID === 'function') ? randomUUID() : `s-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
     const ip = getRequestIp(req);
-    const riskInfo = await assessIpRisk(ip).catch(() => ({ risk: false }));
+    const riskInfo = await assessIpRisk(ip, {
+      userAgent: req.headers['user-agent'] || '',
+      userLanguage: req.headers['accept-language'] || ''
+    }).catch(() => ({ risk: false }));
     const doc = new Session({
       sessionId,
       userId: cleanUserId,
