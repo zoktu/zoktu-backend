@@ -93,6 +93,28 @@ const getRequestIp = (req) => {
   return req.ip || req.connection?.remoteAddress || null;
 };
 
+const resolveClientOrigin = () => {
+  const raw = String(env.clientOrigin || '').trim();
+  if (!raw) return 'https://zoktu.com';
+  const first = raw.split(',').map(s => s.trim()).filter(Boolean)[0];
+  return first || 'https://zoktu.com';
+};
+
+const buildRestrictedUrl = () => `${resolveClientOrigin().replace(/\/$/, '')}/access-restricted`;
+
+// Public pre-auth risk check for login/register pages.
+router.get('/risk-check', asyncHandler(async (req, res) => {
+  const ip = getRequestIp(req);
+  const riskInfo = await assessIpRisk(ip).catch(() => ({ risk: false }));
+  const blocked = Boolean(riskInfo?.risk);
+
+  return res.json({
+    blocked,
+    redirectUrl: blocked ? buildRestrictedUrl() : null,
+    reason: blocked ? (riskInfo?.reason || 'vpn/proxy/tor') : null
+  });
+}));
+
 const resolveClientPlatform = (req) => {
   const headerValue = req.headers['x-client-platform'] || req.headers['x-platform'];
   const bodyValue = req.body?.platform;
