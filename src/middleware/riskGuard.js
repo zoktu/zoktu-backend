@@ -3,6 +3,31 @@ import { env } from '../config/env.js';
 import Session from '../models/Session.js';
 import { users } from '../lib/userStore.js';
 
+const resolveClientOrigin = () => {
+  const raw = String(env.clientOrigin || '').trim();
+  if (!raw) return 'https://zoktu.com';
+  const first = raw.split(',').map(s => s.trim()).filter(Boolean)[0];
+  return first || 'https://zoktu.com';
+};
+
+const buildRestrictedUrl = () => `${resolveClientOrigin().replace(/\/$/, '')}/access-restricted`;
+
+const sendHighRiskBlockedResponse = (req, res) => {
+  const redirectUrl = buildRestrictedUrl();
+  const payload = {
+    message: 'High-risk session detected. Please disable VPN/Proxy/Anonymizer to continue.',
+    code: 'HIGH_RISK_SESSION',
+    redirectUrl
+  };
+
+  const acceptsHtml = String(req.headers.accept || '').includes('text/html');
+  if (acceptsHtml && req.method === 'GET') {
+    return res.redirect(302, redirectUrl);
+  }
+
+  return res.status(403).json(payload);
+};
+
 export const requireVerifiedForHighRisk = async (req, res, next) => {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -31,7 +56,7 @@ export const requireVerifiedForHighRisk = async (req, res, next) => {
     const isRegistered = userRecord && userRecord.userType === 'registered';
     const emailVerified = userRecord?.emailVerified;
     if (isRegistered && emailVerified) return next();
-    return res.status(403).json({ message: 'High-risk session detected. Please register and verify your email to participate in DMs or random/group chats.' });
+    return sendHighRiskBlockedResponse(req, res);
   }
 
   return next();
