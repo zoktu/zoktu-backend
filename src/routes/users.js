@@ -15,35 +15,52 @@ const isUserOnline = (u) => {
   return v === true || v === 'true' || v === 1 || v === '1';
 };
 
+const userAliasKeys = (u) => {
+  if (!u) return [];
+  const aliases = uniqStrings([u.id, u.guestId, u._id, u.email]);
+  if (aliases.length) return aliases;
+  const fallback = String(u.displayName || u.username || u.name || '').trim();
+  return fallback ? [fallback] : [];
+};
+
 const uniqUsers = (list) => {
   const byKey = new Map();
-  for (const u of list || []) {
-    if (!u) continue;
-    const key = String(u.id || u.guestId || u._id || u.email || u.displayName || '').trim();
-    if (!key) continue;
+  const canonicalByAlias = new Map();
 
-    const prev = byKey.get(key);
-    if (!prev) {
-      byKey.set(key, u);
-      continue;
-    }
+  const mergeUsers = (prev, next) => {
+    if (!prev) return next;
+    if (!next) return prev;
 
     // Prefer an online snapshot over an offline duplicate.
     const prevOnline = Boolean(prev?.isOnline);
-    const nextOnline = Boolean(u?.isOnline);
+    const nextOnline = Boolean(next?.isOnline);
 
     if (!prevOnline && nextOnline) {
-      byKey.set(key, { ...prev, ...u, isOnline: true });
-      continue;
+      return { ...prev, ...next, isOnline: true };
     }
 
     if (prevOnline && !nextOnline) {
-      byKey.set(key, { ...u, ...prev, isOnline: true });
-      continue;
+      return { ...next, ...prev, isOnline: true };
     }
 
     // If both have same online status, keep the richer merged object.
-    byKey.set(key, { ...prev, ...u, isOnline: prevOnline || nextOnline });
+    return { ...prev, ...next, isOnline: prevOnline || nextOnline };
+  };
+
+  for (const u of list || []) {
+    if (!u) continue;
+    const aliases = userAliasKeys(u);
+    if (!aliases.length) continue;
+
+    const existingCanonical = aliases.map((alias) => canonicalByAlias.get(alias)).find(Boolean);
+    const key = existingCanonical || aliases[0];
+
+    const prev = byKey.get(key);
+    byKey.set(key, mergeUsers(prev, u));
+
+    for (const alias of aliases) {
+      canonicalByAlias.set(alias, key);
+    }
   }
   return Array.from(byKey.values());
 };

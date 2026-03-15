@@ -355,6 +355,10 @@ router.post('/signup', asyncHandler(async (req, res) => {
   console.log('➡️ /api/auth/signup called', { email: !!email, hasAuthorization: !!req.headers.authorization });
   if (!email || !password) return res.status(400).json({ message: 'email and password required' });
 
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) return res.status(400).json({ message: 'email and password required' });
+  if (!emailRegex.test(normalizedEmail)) return res.status(400).json({ message: 'valid email required' });
+
   // If request contains an auth token, and it's a guest, convert that guest
   const auth = await extractAuthPayload(req);
   let convertingGuest = null;
@@ -379,8 +383,17 @@ router.post('/signup', asyncHandler(async (req, res) => {
 
   if (convertingGuest) {
     // Convert existing guest to registered while preserving displayName
-    if (users.has(email)) return res.status(409).json({ message: 'email already in use' });
-    convertingGuest.email = email;
+    const guestLookupId = String(convertingGuest.guestId || convertingGuest.id || '').trim();
+    const existingByEmail = await User.findOne({ email: normalizedEmail }).select('_id guestId').lean().exec().catch(() => null);
+    if (existingByEmail) {
+      const existingGuestId = String(existingByEmail.guestId || '').trim();
+      const sameGuest = guestLookupId && existingGuestId && guestLookupId === existingGuestId;
+      if (!sameGuest) {
+        return res.status(409).json({ message: 'email already in use' });
+      }
+    }
+
+    convertingGuest.email = normalizedEmail;
     convertingGuest.password = hash;
     convertingGuest.userType = 'registered';
     // prefer provided displayName only if guest has none
@@ -389,7 +402,6 @@ router.post('/signup', asyncHandler(async (req, res) => {
 
     try {
       convertingGuest.lastIp = getRequestIp(req);
-      const guestLookupId = String(convertingGuest.guestId || convertingGuest.id || '').trim();
       const { _id: ignoreId, id: ignoreMemoryId, ...persistableGuest } = convertingGuest;
       let saved = null;
 
@@ -421,19 +433,24 @@ router.post('/signup', asyncHandler(async (req, res) => {
       const token = signToken((merged || convertingGuest), sessionId);
 
       // Fire-and-forget verification email
-      issueEmailVerification({ email, displayName: convertingGuest.displayName || convertingGuest.name || email }).catch(() => {});
+      issueEmailVerification({ email: normalizedEmail, displayName: convertingGuest.displayName || convertingGuest.name || normalizedEmail }).catch(() => {});
       return res.json({ user: sanitizeUser(merged || convertingGuest), token, sessionId });
     } catch (e) {
       console.warn('⚠️ Failed to persist converted guest to registered user', e?.message || e);
-      // fallthrough to in-memory registration
+      return res.status(500).json({ message: 'Could not complete guest-to-account conversion. Please retry.' });
     }
   }
 
   // Regular signup (no guest conversion)
-  const profileName = displayName || email;
+  const existingByEmail = await User.findOne({ email: normalizedEmail }).select('_id').lean().exec().catch(() => null);
+  if (existingByEmail || users.has(normalizedEmail)) {
+    return res.status(409).json({ message: 'email already in use' });
+  }
+
+  const profileName = displayName || normalizedEmail;
   const user = {
     id: String(users.size + 1),
-    email,
+    email: normalizedEmail,
     displayName: profileName,
     name: profileName,
     userType: 'registered',
@@ -447,7 +464,7 @@ router.post('/signup', asyncHandler(async (req, res) => {
   } catch (e) {
     // non-fatal: continue using in-memory copy
   }
-  users.set(email, user);
+  users.set(normalizedEmail, user);
   const sessionId = await createSessionForUser(user.id, req);
   if (!sessionId) {
     return res.status(500).json({ message: 'Unable to create session' });
@@ -455,7 +472,7 @@ router.post('/signup', asyncHandler(async (req, res) => {
   const token = signToken(user, sessionId);
 
   // Fire-and-forget verification email
-  issueEmailVerification({ email, displayName: user.displayName || user.name || email }).catch(() => {});
+  issueEmailVerification({ email: normalizedEmail, displayName: user.displayName || user.name || normalizedEmail }).catch(() => {});
   res.json({ user: sanitizeUser(user), token, sessionId });
 }));
 
