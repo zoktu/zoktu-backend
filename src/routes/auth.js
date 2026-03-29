@@ -350,10 +350,35 @@ const validateGuestUsername = (username) => {
   return { valid: true, username: trimmed };
 };
 
+const DEFAULT_AVATAR_BY_GENDER = {
+  female: '/avatars/default-female.svg',
+  male: '/avatars/default-male.svg'
+};
+
+const resolveDefaultAvatar = (gender) => {
+  const g = String(gender || '').toLowerCase();
+  return g === 'female' ? DEFAULT_AVATAR_BY_GENDER.female : DEFAULT_AVATAR_BY_GENDER.male;
+};
+
+const validateGenderAge = (body) => {
+  const genderRaw = String(body?.gender || '').trim().toLowerCase();
+  if (genderRaw !== 'male' && genderRaw !== 'female') {
+    return { ok: false, error: 'Gender must be male or female' };
+  }
+  const ageNum = Number(body?.age);
+  if (!Number.isFinite(ageNum) || ageNum < 18 || ageNum > 80) {
+    return { ok: false, error: 'Age must be between 18 and 80' };
+  }
+  return { ok: true, gender: genderRaw, age: Math.round(ageNum) };
+};
+
 router.post('/signup', asyncHandler(async (req, res) => {
   const { email, password, displayName } = req.body;
   console.log('➡️ /api/auth/signup called', { email: !!email, hasAuthorization: !!req.headers.authorization });
   if (!email || !password) return res.status(400).json({ message: 'email and password required' });
+
+  const ga = validateGenderAge(req.body);
+  if (!ga.ok) return res.status(400).json({ message: ga.error });
 
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail) return res.status(400).json({ message: 'email and password required' });
@@ -399,6 +424,17 @@ router.post('/signup', asyncHandler(async (req, res) => {
     // prefer provided displayName only if guest has none
     convertingGuest.displayName = convertingGuest.displayName || displayName || email;
     convertingGuest.name = convertingGuest.displayName;
+    convertingGuest.gender = ga.gender;
+    convertingGuest.age = ga.age;
+    {
+      const existingAv = String(convertingGuest.avatar || convertingGuest.photoURL || '').trim();
+      const looksCustom = existingAv && !/\/avatars\/default-(male|female)\.svg(\?|$)/i.test(existingAv);
+      if (!looksCustom) {
+        const def = resolveDefaultAvatar(ga.gender);
+        convertingGuest.avatar = def;
+        convertingGuest.photoURL = def;
+      }
+    }
 
     try {
       convertingGuest.lastIp = getRequestIp(req);
@@ -448,6 +484,7 @@ router.post('/signup', asyncHandler(async (req, res) => {
   }
 
   const profileName = displayName || normalizedEmail;
+  const defaultAvatar = resolveDefaultAvatar(ga.gender);
   const user = {
     id: String(users.size + 1),
     email: normalizedEmail,
@@ -455,7 +492,11 @@ router.post('/signup', asyncHandler(async (req, res) => {
     name: profileName,
     userType: 'registered',
     password: hash,
-    emailVerified: false
+    emailVerified: false,
+    gender: ga.gender,
+    age: ga.age,
+    avatar: defaultAvatar,
+    photoURL: defaultAvatar
   };
   // persist to DB and in-memory
   try {
