@@ -659,6 +659,11 @@ router.post('/login', asyncHandler(async (req, res) => {
 
 router.post('/guest', asyncHandler(async (req, res) => {
   const { name } = req.body;
+  const ga = validateGenderAge(req.body);
+  if (!ga.ok) {
+    return res.status(400).json({ message: ga.error });
+  }
+  const defaultAvatar = resolveDefaultAvatar(ga.gender);
 
   // Validate username
   const validation = validateGuestUsername(name);
@@ -728,6 +733,10 @@ router.post('/guest', asyncHandler(async (req, res) => {
       displayName: saved.displayName,
       name: saved.displayName,
       userType: 'guest',
+      gender: ga.gender,
+      age: ga.age,
+      avatar: defaultAvatar,
+      photoURL: defaultAvatar,
       isOnline: true,
       lastSeen: null,
       createdAt: saved.createdAt
@@ -760,6 +769,10 @@ router.post('/guest', asyncHandler(async (req, res) => {
       displayName: username,
       name: username,
       userType: 'guest',
+      gender: ga.gender,
+      age: ga.age,
+      avatar: defaultAvatar,
+      photoURL: defaultAvatar,
       isOnline: true,
       lastSeen: null
     };
