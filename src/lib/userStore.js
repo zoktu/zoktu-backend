@@ -75,9 +75,15 @@ export function upsertUserInMemory(docOrUser) {
 }
 
 export async function seedUsersFromDb() {
+  try {
+    // Reset all ghost online statuses from previous sessions
+    await User.updateMany({ isOnline: true }, { $set: { isOnline: false } }).exec();
+  } catch (e) {
+    console.warn('⚠️ Failed to reset online statuses on startup', e);
+  }
   const docs = await User.find({}).lean().exec();
   docs.forEach((doc) => {
-    upsertUserInMemory({ ...doc, id: String(doc._id) });
+    upsertUserInMemory({ ...doc, isOnline: false, id: String(doc._id) });
   });
 }
 
@@ -86,6 +92,11 @@ export async function persistUserToDb(user) {
   // Only persist registered accounts (those with email)
   const data = { ...user };
   delete data.id;
+
+  // Prevent empty string emails from breaking the MongoDB unique index
+  if (data.email === '') {
+    delete data.email;
+  }
 
   // Keep profile photo fields consistent across the codebase.
   // Some UI writes `photoURL`, others write `avatar`.

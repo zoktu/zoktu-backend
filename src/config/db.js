@@ -1,5 +1,13 @@
 import mongoose from 'mongoose';
 import { env } from './env.js';
+import dns from 'dns';
+
+// Use Google's public DNS to fix local loopback DNS issues causing querySrv ECONNREFUSED
+try {
+  dns.setServers(['8.8.8.8', '8.8.4.4']);
+} catch (e) {
+  // Ignore or log silently
+}
 
 export async function connectDb() {
   try {
