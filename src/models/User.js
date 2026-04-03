@@ -48,6 +48,8 @@ const UserSchema = new mongoose.Schema({
   // Session info for user sessions (debugging/management)
   sessions: [{ token: String, createdAt: Date, lastActive: Date }],
   friends: [{ type: String }],
+  followers: [{ type: String }],
+  following: [{ type: String }],
   blockedUsers: [{ type: String }],
   lastIp: String,
   lastActive: Date,

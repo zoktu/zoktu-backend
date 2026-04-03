@@ -561,15 +561,123 @@ router.post('/:id/block', asyncHandler(async (req, res) => {
   const canonTarget = await canonicalBlockedId(blockedUserId);
   if (!canonTarget) return res.status(400).json({ message: 'blockedUserId required' });
 
+  const meId = String(me._id);
   const existing = Array.isArray(me.blockedUsers) ? me.blockedUsers.map(String).filter(Boolean) : [];
   const next = existing.includes(canonTarget) ? existing : [...existing, canonTarget];
 
   try {
-    const updated = await User.findByIdAndUpdate(me._id, { $set: { blockedUsers: next } }, { new: true }).lean().exec();
+    // 1. Update blocked list
+    const updated = await User.findByIdAndUpdate(meId, { $set: { blockedUsers: next } }, { new: true }).lean().exec();
     syncUserStoreEntry(updated);
-    return res.json({ message: 'blocked', target: canonTarget, blockedUsers: Array.isArray(updated?.blockedUsers) ? updated.blockedUsers : next });
+
+    // 2. Remove from friends/followers/following on both sides
+    const targetEquivalents = Array.from(await expandUserIdEquivalents(blockedUserId));
+    const myEquivalents = Array.from(await expandUserIdEquivalents(meId));
+
+    // Remove target from my lists
+    await User.updateOne(
+      { _id: meId },
+      { 
+        $pull: { 
+          friends: { $in: targetEquivalents },
+          following: { $in: targetEquivalents },
+          followers: { $in: targetEquivalents }
+        } 
+      }
+    ).exec();
+
+    // Remove me from target lists
+    await User.updateMany(
+      { $or: [{ _id: blockedUserId }, { guestId: blockedUserId }] },
+      { 
+        $pull: { 
+          friends: { $in: myEquivalents },
+          following: { $in: myEquivalents },
+          followers: { $in: myEquivalents }
+        } 
+      }
+    ).exec();
+
+    return res.json({ message: 'blocked', target: canonTarget, blockedUsers: next });
   } catch (e) {
     return res.status(500).json({ message: 'Failed to persist block', error: e?.message || e });
+  }
+}));
+
+router.post('/:id/follow', asyncHandler(async (req, res) => {
+  const userId = req.params.id;
+  const targetIdRaw = req.body?.targetId || req.body?.userId;
+  if (!targetIdRaw) return res.status(400).json({ message: 'targetId required' });
+
+  const payload = getAuthPayload(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+  const ok = await authMatchesUserId(payload, userId);
+  if (!ok) return res.status(403).json({ message: 'Forbidden' });
+
+  const me = await getAuthedUserDoc(payload, userId);
+  if (!me) return res.status(404).json({ message: 'User not found' });
+
+  const meId = String(me._id);
+  const targetId = await canonicalBlockedId(targetIdRaw);
+  if (!targetId) return res.status(400).json({ message: 'Invalid targetId' });
+  if (String(targetId) === String(meId)) return res.status(400).json({ message: 'Cannot follow yourself' });
+
+  // Check if blocked
+  if (Array.isArray(me.blockedUsers) && me.blockedUsers.includes(targetId)) {
+    return res.status(403).json({ message: 'Unblock user to follow them' });
+  }
+
+  try {
+    // Add to my following
+    const updatedMe = await User.findByIdAndUpdate(meId, { $addToSet: { following: targetId } }, { new: true }).lean().exec();
+    syncUserStoreEntry(updatedMe);
+
+    // Add to target's followers
+    const targetDoc = await User.findOneAndUpdate(
+      { $or: [{ _id: targetId }, { guestId: targetId }] },
+      { $addToSet: { followers: meId } },
+      { new: true }
+    ).lean().exec();
+    if (targetDoc) syncUserStoreEntry(targetDoc);
+
+    res.json({ message: 'followed', targetId, following: updatedMe.following });
+  } catch (e) {
+    res.status(500).json({ message: 'Failed to follow user', error: e?.message || e });
+  }
+}));
+
+router.post('/:id/unfollow', asyncHandler(async (req, res) => {
+  const userId = req.params.id;
+  const targetIdRaw = req.body?.targetId || req.body?.userId;
+  if (!targetIdRaw) return res.status(400).json({ message: 'targetId required' });
+
+  const payload = getAuthPayload(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+  const ok = await authMatchesUserId(payload, userId);
+  if (!ok) return res.status(403).json({ message: 'Forbidden' });
+
+  const me = await getAuthedUserDoc(payload, userId);
+  if (!me) return res.status(404).json({ message: 'User not found' });
+
+  const meId = String(me._id);
+  const targetId = await canonicalBlockedId(targetIdRaw);
+
+  try {
+    // Remove from my following
+    const updatedMe = await User.findByIdAndUpdate(meId, { $pull: { following: targetId } }, { new: true }).lean().exec();
+    syncUserStoreEntry(updatedMe);
+
+    // Remove from target's followers
+    const targetDoc = await User.findOneAndUpdate(
+      { $or: [{ _id: targetId }, { guestId: targetId }] },
+      { $pull: { followers: meId } },
+      { new: true }
+    ).lean().exec();
+    if (targetDoc) syncUserStoreEntry(targetDoc);
+
+    res.json({ message: 'unfollowed', targetId, following: updatedMe.following });
+  } catch (e) {
+    res.status(500).json({ message: 'Failed to unfollow user', error: e?.message || e });
   }
 }));
 

@@ -245,37 +245,78 @@ io.on('connection', (socket) => {
   // Join random queue
   socket.on('random:join', async (data) => {
     const uid = data?.userId || userId || `guest-${socket.id}`;
-    // Try to find a waiting partner
-    for (let i = 0; i < waitingSockets.length; i++) {
-      const waiter = waitingSockets[i];
-      if (waiter.uid !== uid) {
-        waitingSockets.splice(i, 1);
-        const roomId = `dm-${Date.now()}`;
-        // have both sockets join room
+    
+    // Purge dead sockets from the queue while searching
+    while (waitingSockets.length > 0) {
+      const waiter = waitingSockets.shift();
+      
+      // Basic check: is the waiter still connected?
+      if (!waiter || !waiter.socket || !waiter.socket.connected) {
+        continue;
+      }
+      
+      // Basic check: is it NOT me? (Same user id or guest id can't match)
+      if (String(waiter.uid) === String(uid)) {
+        // Technically this shouldn't happen with unique guest ids, 
+        // but if a logged in user opens two tabs, we just add them back to the end
+        // wait, actually we should just skip them for now
+        waitingSockets.push(waiter);
+        break; // Stop looking for now or we might infinite loop if it's just us
+      }
+
+      // We found a valid match!
+      // Use a more global-unique ID to prevent collisions
+      const randomSuffix = Math.random().toString(36).slice(2, 7);
+      const roomId = `dm-${Date.now()}-${randomSuffix}`;
+      
+      try {
+        // Have both sockets join the room
         socket.join(roomId);
-        try { waiter.socket.join(roomId); } catch (e) {}
-        // persist DM room in DB (best-effort)
-        try {
-          const doc = new DMRoom({ _id: roomId, type: 'dm', category: 'dm', participants: [waiter.uid, uid], members: [waiter.uid, uid], createdBy: waiter.uid });
-          await doc.save();
-        } catch (e) {}
-        // notify both
+        waiter.socket.join(roomId);
+        
+        // Persist DM room in DB
+        const participants = [String(waiter.uid), String(uid)].sort();
+        const doc = new DMRoom({ 
+          _id: roomId, 
+          type: 'dm', 
+          category: 'random', 
+          participants: participants, 
+          members: participants, 
+          createdBy: String(waiter.uid) 
+        });
+        await doc.save();
+        
+        console.log(`[Socket] Random match: ${waiter.uid} <-> ${uid} in room ${roomId}`);
+        
+        // Notify both clients
         socket.emit('random:matched', { roomId, partnerId: waiter.uid });
-        try { waiter.socket.emit('random:matched', { roomId, partnerId: uid }); } catch (e) {}
+        waiter.socket.emit('random:matched', { roomId, partnerId: uid });
+        return;
+      } catch (err) {
+        console.error('[Socket] Failed to create random match room:', err);
+        // If DB save failed (unlikely now with suffix), we ignore and move on?
+        // Actually, we should still notify them or they get stuck.
+        socket.emit('random:matched', { roomId, partnerId: waiter.uid });
+        waiter.socket.emit('random:matched', { roomId, partnerId: uid });
         return;
       }
     }
 
-    // no match -> add to waiting list
+    // No valid match found -> add to waiting list
+    // First, remove any existing entry for this socket if they are re-joining
+    const existingIdx = waitingSockets.findIndex(w => w.socket.id === socket.id);
+    if (existingIdx !== -1) waitingSockets.splice(existingIdx, 1);
+    
     waitingSockets.push({ socket, uid, createdAt: Date.now() });
-    // auto-timeout after 20s
+    
+    // auto-timeout after 25s (increased slightly)
     setTimeout(() => {
       const idx = waitingSockets.findIndex(w => w.socket.id === socket.id);
       if (idx !== -1) {
         waitingSockets.splice(idx, 1);
         socket.emit('random:timeout');
       }
-    }, 20000);
+    }, 25000);
   });
 
   socket.on('random:leave', () => {
@@ -339,32 +380,53 @@ io.on('connection', (socket) => {
         return;
       }
 
-          // persist message to DB
-          (async () => {
-            try {
-              // determine room type and pick the model
-              const roomDoc = await getRoomDocById(roomId);
-              const Model = (await import('./models/Message.js')).getModelForRoom(roomDoc);
-              const doc = new Model({ roomId, senderId, senderName: senderName || '', content, type: 'text' });
-              await doc.save();
-              const msg = { id: doc._id.toString(), roomId, senderId, senderName: doc.senderName, content: doc.content, timestamp: doc.createdAt.toISOString() };
-              // update in-memory cache
-              try {
-                const list = messages.get(roomId) || [];
-                list.push(msg);
-                messages.set(roomId, list);
-              } catch (e) {}
-              // broadcast to room
-              io.to(roomId).emit('room:message', msg);
-            } catch (e) {
-              // fallback: broadcast without persistence
-              const fallbackMsg = { id: `msg-${Date.now()}-${Math.floor(Math.random()*1000)}`, roomId, senderId, senderName, content, timestamp: new Date().toISOString() };
-              const list = messages.get(roomId) || [];
-              list.push(fallbackMsg);
-              messages.set(roomId, list);
-              io.to(roomId).emit('room:message', fallbackMsg);
-            }
-          })();
+      // persist message to DB
+      (async () => {
+        try {
+          // determine room type and pick the model
+          const roomDoc = await getRoomDocById(roomId);
+          const Model = (await import('./models/Message.js')).getModelForRoom(roomDoc);
+          
+          // Anonymity for random chats
+          const isRandom = roomDoc && roomDoc.category === 'random';
+          const nameForDb = senderName || '';
+          
+          const doc = new Model({ roomId, senderId, senderName: nameForDb, content, type: 'text' });
+          await doc.save();
+          
+          const msg = { 
+            id: doc._id.toString(), 
+            roomId, 
+            senderId, 
+            senderName: isRandom ? 'Stranger' : (doc.senderName || 'User'), 
+            content: doc.content, 
+            timestamp: doc.createdAt.toISOString() 
+          };
+          
+          // update in-memory cache
+          try {
+            const list = messages.get(roomId) || [];
+            list.push(msg);
+            messages.set(roomId, list.slice(-100)); // limit cache size
+          } catch (e) {}
+
+          // broadcast to room
+          io.to(roomId).emit('room:message', msg);
+        } catch (e) {
+          console.error('[Socket] Message persistence failed:', e);
+          // fallback: broadcast without persistence
+          const isRandom = roomId.startsWith('dm-'); // heuristic if roomDoc fetch failed
+          const fallbackMsg = { 
+            id: `msg-${Date.now()}-${Math.floor(Math.random()*1000)}`, 
+            roomId, 
+            senderId, 
+            senderName: isRandom ? 'Stranger' : (senderName || 'User'), 
+            content, 
+            timestamp: new Date().toISOString() 
+          };
+          io.to(roomId).emit('room:message', fallbackMsg);
+        }
+      })();
     } catch (e) {
       // ignore
     }
