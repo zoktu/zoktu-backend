@@ -77,6 +77,7 @@ const httpServer = createServer(app);
 const io = new IOServer(httpServer, {
   cors: { origin: allowedOrigins, methods: ['GET', 'POST'] }
 });
+app.set('io', io);
 
 // Simple in-memory socket registries and waiting queue for random pairing
 const socketsByUser = new Map(); // userId -> socket

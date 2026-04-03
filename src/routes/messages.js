@@ -1086,6 +1086,24 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     messages.set(roomId, list);
   } catch (e) {}
 
+  // Broadcast instantly via WebSocket for WhatsApp-like instant experience
+  try {
+    const io = req.app.get('io');
+    if (io) {
+      io.to(roomId).emit('room:message', {
+        id: doc._id.toString(),
+        roomId,
+        senderId: doc.senderId,
+        senderName: doc.senderName,
+        content: decryptMessageContent(doc.content),
+        type: doc.type,
+        attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
+        timestamp: doc.createdAt.toISOString(),
+        replyTo: doc.replyTo
+      });
+    }
+  } catch (err) {}
+
   await createNotificationsForMessage({
     roomDoc,
     doc,
