@@ -866,6 +866,7 @@ router.get('/me', asyncHandler(async (req, res) => {
     email: user?.email || payload.email,
     userType: user?.userType || payload.userType,
     premiumStatus: user?.premiumStatus,
+    isPremium: user?.isPremium ?? false,
     name: user?.name || displayName,
     displayName,
     username: user?.username,
