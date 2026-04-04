@@ -1060,24 +1060,6 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     replyTo: replyTo ? String(replyTo) : undefined,
     attachments: safeAttachments
   });
-  await doc.save();
-  // keep in-memory cache for quick reads (optional)
-  try {
-    const list = messages.get(roomId) || [];
-    list.push({
-      id: doc._id.toString(),
-      roomId,
-      senderId: doc.senderId,
-      senderName: doc.senderName,
-      content: decryptMessageContent(doc.content),
-      type: doc.type,
-      attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
-      timestamp: doc.createdAt.toISOString(),
-      replyTo: doc.replyTo
-    });
-    messages.set(roomId, list);
-  } catch (e) {}
-
   // Broadcast instantly via WebSocket for WhatsApp-like instant experience
   try {
     const io = req.app.get('io');
@@ -1090,11 +1072,13 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
         content: decryptMessageContent(doc.content),
         type: doc.type,
         attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
-        timestamp: doc.createdAt.toISOString(),
+        timestamp: new Date().toISOString(),
         replyTo: doc.replyTo
       });
     }
   } catch (err) {}
+
+  await doc.save();
 
   await createNotificationsForMessage({
     roomDoc,
