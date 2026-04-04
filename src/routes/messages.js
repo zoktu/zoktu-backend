@@ -657,6 +657,9 @@ router.get('/rooms/:roomId/messages', (req, res) => {
   // load from DB (most recent first or paginated)
   (async () => {
     try {
+      const limit = Math.min(Number(req.query.limit) || 50, 100);
+      const before = req.query.before;
+      
       const roomDoc = await getRoomDocById(roomId);
       const Model = getModelForRoom(roomDoc);
       let query = { roomId };

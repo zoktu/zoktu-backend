@@ -277,18 +277,21 @@ router.get('/:id', asyncHandler(async (req, res) => {
     // ignore
   }
 
-  // Final fallback for guests not yet in DB
-  const fallback = { 
-    id: req.params.id, 
-    displayName: req.params.id.startsWith('guest-') ? `Guest-${req.params.id.split('-').slice(-1)[0]}` : 'Guest', 
-    userType: 'guest',
-    roomsCount: 0,
-    karma: 0,
-    followers: [],
-    following: []
-  };
-  users.set(req.params.id, fallback);
-  return res.json(filterUserForViewer({ viewerIds, user: fallback }));
+  // Final fallback if DB read fails and user isn't in memory
+  let existingMem = users.get(req.params.id);
+  if (!existingMem) {
+    existingMem = { 
+      id: req.params.id, 
+      displayName: req.params.id.startsWith('guest-') ? `Guest-${req.params.id.split('-').slice(-1)[0]}` : 'Guest', 
+      userType: 'guest',
+      roomsCount: 0,
+      karma: 0,
+      followers: [],
+      following: []
+    };
+    users.set(req.params.id, existingMem);
+  }
+  return res.json(filterUserForViewer({ viewerIds, user: existingMem }));
 }));
 
 const getAuthedUserDoc = async (payload, userIdParam) => {
