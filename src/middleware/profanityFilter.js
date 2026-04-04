@@ -86,8 +86,21 @@ const SAFE_ALLOWLIST = new Set(['m','ya','ho','bhai','bro','dude','ok','okay','y
 export const containsProfanity = (text) => {
   if (!text) return false;
 
+  // Pre-strip all whitelisted links so they don't trigger false positives
+  let textToCheck = String(text);
+  const links = extractLinkCandidates(textToCheck);
+  for (const link of links) {
+    const host = tryGetHostname(link);
+    if (host && isAllowedHost(host)) {
+      // Remove the link from the text we check for profanity
+      textToCheck = textToCheck.replace(link, ' ');
+    }
+  }
+
+  if (!textToCheck.trim()) return false;
+
   // Token-level quick checks (handles spaced words)
-  const tokens = cleanAndTokenize(text);
+  const tokens = cleanAndTokenize(textToCheck);
   for (const t of tokens) {
     const norm = normalizeWord(applyLeetMap(t));
     if (!norm) continue;
@@ -96,8 +109,8 @@ export const containsProfanity = (text) => {
 
   // If input contains Devanagari, also check its romanized form
   try {
-    const romanized = devanagariToLatin(text);
-    if (romanized && romanized !== String(text)) {
+    const romanized = devanagariToLatin(textToCheck);
+    if (romanized && romanized !== String(textToCheck)) {
       const tokens2 = cleanAndTokenize(romanized);
       for (const t of tokens2) {
         const norm = normalizeWord(applyLeetMap(t));
@@ -110,7 +123,7 @@ export const containsProfanity = (text) => {
   // Dense normalized string check (handles underscores, punctuation, mixed-case, repeated chars, joined words)
   try {
     // Work per-token to avoid matching across unrelated long words
-    const denseTokens = cleanAndTokenize(String(text).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ')).map(t => normalizeWord(applyLeetMap(t)));
+    const denseTokens = cleanAndTokenize(String(textToCheck).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ')).map(t => normalizeWord(applyLeetMap(t)));
     if (denseTokens && denseTokens.length) {
       for (const bad of PROFANITY_SET) {
         if (!bad) continue;
@@ -130,7 +143,7 @@ export const containsProfanity = (text) => {
   // Heuristic subsequence matching to catch obfuscation like `f*ck`, `f**k`, `f_ck`, `f.u.c.k` etc.
   try {
     // Tokenize and apply subsequence check per token to avoid cross-word false positives
-    const raw = applyLeetMap(String(text).toLowerCase()).replace(/[^\p{L}\p{N}\*\s]/gu, ' ');
+    const raw = applyLeetMap(String(textToCheck).toLowerCase()).replace(/[^\p{L}\p{N}\*\s]/gu, ' ');
     const tokenHay = cleanAndTokenize(raw);
     for (const token of tokenHay) {
       if (!token) continue;
