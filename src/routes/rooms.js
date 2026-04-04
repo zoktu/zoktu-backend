@@ -714,9 +714,9 @@ router.post('/:id/ban', asyncHandler(async (req, res) => {
       }
 
       try {
-        const fresh = roomModel ? await roomModel.findById(id).lean().catch(() => null) : null;
-        if (fresh) {
-          rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh });
+        const io = req.app.get('io');
+        if (io) {
+          io.to(id).emit('room:member-kicked', { roomId: id, targetUserId: targetUserId ? String(targetUserId) : null, targets: uniqueBannedIds });
         }
       } catch (e) {}
 
@@ -962,6 +962,12 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     const updated = await roomModel.findByIdAndUpdate(id, { $set: setObj }, { new: true }).lean();
     if (updated) {
       try { rooms.set(String(updated._id), { id: String(updated._id), ...updated }); } catch (e) {}
+      
+      const io = req.app.get('io');
+      if (io) {
+        io.to(id).emit('room:update', { id: updated._id, ...updated });
+      }
+
       return res.json({ id: updated._id, ...updated });
     }
   } catch (e) {
