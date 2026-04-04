@@ -1103,8 +1103,7 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     auth
   });
 
-  await pruneExpiredDisappearingMessages({ Model, roomId, roomDoc });
-  await pruneRoomMessages({ roomDoc, roomId, Model });
+
   if (await shouldBotReply(roomDoc, senderIdEffective, content, req.body?.type, replyTo)) {
     botLastReplyByRoom.set(String(roomId), Date.now());
     setTimeout(() => {
