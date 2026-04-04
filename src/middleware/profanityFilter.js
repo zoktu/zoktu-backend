@@ -153,7 +153,7 @@ export const containsProfanity = (text) => {
   return false;
 };
 
-const ALLOWED_LINK_HOSTS = new Set(['zoktu.com', 'www.zoktu.com']);
+// Allowed link host check
 
 const normalizeHost = (raw) => {
   if (!raw) return '';
@@ -164,8 +164,18 @@ const normalizeHost = (raw) => {
 const isAllowedHost = (host) => {
   const normalized = normalizeHost(host);
   if (!normalized) return false;
-  if (ALLOWED_LINK_HOSTS.has(normalized)) return true;
-  return normalized.endsWith('.zoktu.com');
+  
+  // Direct match or subdomain of zoktu.com
+  if (normalized === 'zoktu.com' || normalized.endsWith('.zoktu.com')) return true;
+  
+  // Whitelisted media/static hosts
+  const whitelisted = [
+    'giphy.com',
+    'jsdelivr.net',
+    'cloudinary.com'
+  ];
+  
+  return whitelisted.some(w => normalized === w || normalized.endsWith('.' + w));
 };
 
 const extractLinkCandidates = (text) => {
