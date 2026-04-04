@@ -4,6 +4,8 @@ import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { users, persistUserToDb } from '../lib/userStore.js';
 import User from '../models/User.js';
+import Room from '../models/Room.js';
+import DMRoom from '../models/DMRoom.js';
 import { containsProfanity } from '../middleware/profanityFilter.js';
 
 const router = Router();
@@ -227,16 +229,36 @@ router.get('/:id', asyncHandler(async (req, res) => {
     return res.json(filterUserForViewer({ viewerIds, user: botProfile }));
   }
 
-  let user = users.get(req.params.id) || null;
-  if (user) return res.json(filterUserForViewer({ viewerIds, user }));
+  // Remove early return from cache to ensure stats are always freshly calculated
+  const idToResolve = String(req.params.id);
+  const ids = Array.from(await expandUserIdEquivalents(idToResolve));
 
   // DB fallback (important for blockedUsers/friends persistence)
   try {
-    const id = String(req.params.id);
-    const doc = await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).lean().exec().catch(() => null);
+    const doc = await User.findOne({ $or: [{ _id: idToResolve }, { guestId: idToResolve }, { username: idToResolve }, { email: idToResolve }] }).lean().exec().catch(() => null);
     if (doc) {
       const derivedUsername = doc.username || doc.displayName || doc.name || (doc.email ? String(doc.email).split('@')[0] : undefined);
-      const entry = { ...doc, id: String(doc._id), username: derivedUsername };
+      
+      // Calculate real-time stats (using expanded IDs to match any participant identifier)
+      const [roomsCount, dmRoomsCount] = await Promise.all([
+        Room.countDocuments({ $or: [{ participants: { $in: ids } }, { members: { $in: ids } }] }),
+        DMRoom.countDocuments({ $or: [{ participants: { $in: ids } }, { members: { $in: ids } }] })
+      ]);
+      const totalRooms = roomsCount + dmRoomsCount;
+
+      const views = (doc.profileViews?.count || 0);
+      const msgCount = (doc.chatStats?.totalMessages || 0);
+      const level = (doc.chatStats?.level || 0);
+      const karma = Math.floor((msgCount / 50) + (level * 10) + (views * 2));
+
+      const entry = { 
+        ...doc, 
+        id: String(doc._id), 
+        username: derivedUsername,
+        roomsCount: totalRooms,
+        karma: karma 
+      };
+
       if (doc.email) users.set(doc.email, entry);
       if (doc.guestId) users.set(doc.guestId, entry);
       users.set(String(doc._id), entry);
@@ -255,14 +277,22 @@ router.get('/:id', asyncHandler(async (req, res) => {
     // ignore
   }
 
-  // Final fallback
-  const fallback = { id: req.params.id, displayName: 'Guest', userType: 'guest' };
+  // Final fallback for guests not yet in DB
+  const fallback = { 
+    id: req.params.id, 
+    displayName: 'Guest', 
+    userType: 'guest',
+    roomsCount: 0,
+    karma: 0,
+    followers: [],
+    following: []
+  };
   users.set(req.params.id, fallback);
   return res.json(filterUserForViewer({ viewerIds, user: fallback }));
 }));
 
 const getAuthedUserDoc = async (payload, userIdParam) => {
-  // Prefer registered accounts by email; otherwise resolve by id/guestId.
+  // Resolve by email from payload first
   try {
     if (payload?.email) {
       const doc = await User.findOne({ email: String(payload.email) }).lean().exec().catch(() => null);
@@ -272,8 +302,17 @@ const getAuthedUserDoc = async (payload, userIdParam) => {
 
   const id = String(userIdParam || payload?.id || '').trim();
   if (!id) return null;
+  
+  // Resolve by any identifier (id, guestId, username, email)
   try {
-    return await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).lean().exec().catch(() => null);
+    return await User.findOne({ 
+      $or: [
+        { _id: id }, 
+        { guestId: id }, 
+        { username: id }, 
+        { email: id }
+      ] 
+    }).lean().exec().catch(() => null);
   } catch (e) {
     return null;
   }
@@ -283,7 +322,15 @@ const canonicalBlockedId = async (rawId) => {
   const id = String(rawId || '').trim();
   if (!id) return null;
   try {
-    const doc = await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).select('_id guestId userType').lean().exec().catch(() => null);
+    const doc = await User.findOne({ 
+      $or: [
+        { _id: id }, 
+        { guestId: id }, 
+        { username: id }, 
+        { email: id }
+      ] 
+    }).select('_id guestId userType').lean().exec().catch(() => null);
+    
     if (!doc) return id;
     if (doc.userType === 'guest' && doc.guestId) return String(doc.guestId);
     if (doc._id) return String(doc._id);
@@ -299,9 +346,18 @@ const expandUserIdEquivalents = async (rawId) => {
   if (!id) return set;
   set.add(id);
   try {
-    const doc = await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).select('_id guestId').lean().exec().catch(() => null);
+    const doc = await User.findOne({ 
+      $or: [
+        { _id: id }, 
+        { guestId: id }, 
+        { username: id }, 
+        { email: id }
+      ] 
+    }).select('_id guestId email username').lean().exec().catch(() => null);
     if (doc?._id) set.add(String(doc._id));
     if (doc?.guestId) set.add(String(doc.guestId));
+    if (doc?.email) set.add(String(doc.email));
+    if (doc?.username) set.add(String(doc.username));
   } catch (e) {}
   return set;
 };
@@ -321,27 +377,24 @@ const authMatchesUserId = async (payload, userIdParam) => {
   const param = String(userIdParam || '');
   if (!param) return false;
 
-  // direct match
-  if (payload.id && String(payload.id) === param) return true;
-  if (payload.userId && String(payload.userId) === param) return true;
-  if (payload._id && String(payload._id) === param) return true;
-  if (payload.guestId && String(payload.guestId) === param) return true;
+  const equivalents = await expandUserIdEquivalents(param);
+  
+  // Check payload identifiers against the equivalents set
+  if (payload.id && equivalents.has(String(payload.id))) return true;
+  if (payload.userId && equivalents.has(String(payload.userId))) return true;
+  if (payload._id && equivalents.has(String(payload._id))) return true;
+  if (payload.guestId && equivalents.has(String(payload.guestId))) return true;
 
-  // email -> resolve user
+  // Resolve payload email to further identifiers if needed
   try {
     if (payload.email) {
-      const u = await User.findOne({ email: String(payload.email) }).select('_id guestId').lean().catch(() => null);
-      if (u?._id && String(u._id) === param) return true;
-      if (u?.guestId && String(u.guestId) === param) return true;
-    }
-  } catch (e) {}
-
-  // payload.id might be an object id -> resolve user
-  try {
-    if (payload.id && looksLikeObjectId(payload.id)) {
-      const u = await User.findById(String(payload.id)).select('_id guestId').lean().catch(() => null);
-      if (u?._id && String(u._id) === param) return true;
-      if (u?.guestId && String(u.guestId) === param) return true;
+      if (equivalents.has(String(payload.email))) return true;
+      const u = await User.findOne({ email: String(payload.email) }).select('_id guestId username').lean().catch(() => null);
+      if (u) {
+        if (u._id && equivalents.has(String(u._id))) return true;
+        if (u.guestId && equivalents.has(String(u.guestId))) return true;
+        if (u.username && equivalents.has(String(u.username))) return true;
+      }
     }
   } catch (e) {}
 
