@@ -102,16 +102,29 @@ const updateRoomDocById = async (id, update) => {
   return doc;
 };
 
+const roomCache = new Map();
+const ROOM_CACHE_TTL = 30000; // 30 seconds
+
 const getRoomDocById = async (id) => {
   if (!id) return null;
+  
+  const cached = roomCache.get(id);
+  if (cached && (Date.now() - cached.ts < ROOM_CACHE_TTL)) {
+    return cached.doc;
+  }
+
   const preferDm = String(id).startsWith('dm-');
   const primary = preferDm ? DMRoom : Room;
   const secondary = preferDm ? Room : DMRoom;
 
   let doc = await primary.findById(id).lean().catch(() => null);
-  if (doc) return doc;
+  if (!doc) {
+    doc = await secondary.findById(id).lean().catch(() => null);
+  }
 
-  doc = await secondary.findById(id).lean().catch(() => null);
+  if (doc) {
+    roomCache.set(id, { doc, ts: Date.now() });
+  }
   return doc;
 };
 

@@ -12,7 +12,11 @@ const MessageSchema = new mongoose.Schema({
   editedAt: { type: Date },
   reactions: [{ emoji: String, userId: String, createdAt: Date }],
   meta: { type: Object }
-});
+}, { timestamps: false });
+
+// Compound index for high-performance message retrieval (last X messages in a room)
+MessageSchema.index({ roomId: 1, createdAt: -1 });
+MessageSchema.index({ senderId: 1, createdAt: -1 });
 
 // Separate collections for different chat types
 const RoomMessage = mongoose.models.RoomMessage || mongoose.model('RoomMessage', MessageSchema, 'room_messages');

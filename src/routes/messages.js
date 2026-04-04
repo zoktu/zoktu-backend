@@ -41,8 +41,20 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 
 
+const roomCache = new Map();
+const ROOM_CACHE_TTL = 30000; // 30 seconds
+
 const getRoomDocById = async (id, select = null) => {
   if (!id) return null;
+
+  // Only cache if no specific select is requested, or cache hit matches select (simplified: only cache full docs)
+  if (!select) {
+    const cached = roomCache.get(id);
+    if (cached && (Date.now() - cached.ts < ROOM_CACHE_TTL)) {
+      return cached.doc;
+    }
+  }
+
   const preferDm = String(id).startsWith('dm-');
   const primary = preferDm ? DMRoom : Room;
   const secondary = preferDm ? Room : DMRoom;
@@ -50,11 +62,16 @@ const getRoomDocById = async (id, select = null) => {
   let query = primary.findById(id);
   if (select) query = query.select(select);
   let doc = await query.lean().catch(() => null);
-  if (doc) return doc;
+  
+  if (!doc) {
+    query = secondary.findById(id);
+    if (select) query = query.select(select);
+    doc = await query.lean().catch(() => null);
+  }
 
-  query = secondary.findById(id);
-  if (select) query = query.select(select);
-  doc = await query.lean().catch(() => null);
+  if (doc && !select) {
+    roomCache.set(id, { doc, ts: Date.now() });
+  }
   return doc;
 };
 
