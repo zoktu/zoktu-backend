@@ -856,7 +856,7 @@ router.get('/me', asyncHandler(async (req, res) => {
     }
   } catch (_) {}
 
-  const displayName = user?.displayName || user?.name || payload.email || 'User';
+  const displayName = user?.displayName || user?.name || payload.email || (payload.id && String(payload.id).startsWith('guest-') ? `Guest-${String(payload.id).split('-').slice(-1)[0]}` : 'User');
   const createdAt = user?.createdAt || (payload?.iat ? new Date(Number(payload.iat) * 1000) : undefined);
   const avatarUrl = (user?.avatar || user?.photoURL || '').toString().trim();
 

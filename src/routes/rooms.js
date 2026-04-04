@@ -545,6 +545,15 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
       const addParticipants = shouldAddBot
         ? { $each: [String(userId), String(BOT_ID)] }
         : String(userId);
+      // Ensure user record is persisted to MongoDB so names/stats survive server restarts
+      const userToPersist = users.get(String(userId));
+      if (userToPersist) {
+        upsertUserInMemory(userToPersist, true);
+      } else {
+        const uDoc = await User.findOne({ $or: [{ _id: String(userId) }, { guestId: String(userId) }] }).lean().catch(() => null);
+        if (uDoc) upsertUserInMemory(uDoc, true);
+      }
+
       await roomModel.findByIdAndUpdate(
         id,
         { $addToSet: { participants: addParticipants, members: addParticipants }, $set: { updatedAt: new Date() } },
@@ -554,6 +563,14 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
       if (fresh) {
         // keep cache lightly in sync
         try { rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh }); } catch (e) {}
+        
+        const io = req.app.get('io');
+        if (io) {
+          io.to(id).emit('room:member-joined', { roomId: id, userId: String(userId) });
+          // Also emit room:update to refresh member lists
+          io.to(id).emit('room:update', { id: fresh._id, ...fresh });
+        }
+
         return res.json({ id: fresh._id, ...fresh });
       }
     } catch (e) {
@@ -706,8 +723,17 @@ router.post('/:id/ban', asyncHandler(async (req, res) => {
       const bannedIpList = ipToBan ? [ipToBan] : (banIp && ip ? [ip] : []);
 
       const updateObj = {};
-      if (uniqueBannedIds.length) updateObj.$addToSet = { bannedUsers: { $each: uniqueBannedIds } };
-      if (bannedIpList.length) updateObj.$addToSet = Object.assign(updateObj.$addToSet || {}, { bannedIPs: { $each: bannedIpList } });
+      if (uniqueBannedIds.length) {
+        updateObj.$addToSet = { bannedUsers: { $each: uniqueBannedIds } };
+        // ALSO: Remove them from members/participants so they are kicked from the list immediately
+        updateObj.$pull = { 
+          members: { $in: uniqueBannedIds },
+          participants: { $in: uniqueBannedIds }
+        };
+      }
+      if (bannedIpList.length) {
+        updateObj.$addToSet = Object.assign(updateObj.$addToSet || {}, { bannedIPs: { $each: bannedIpList } });
+      }
 
       if (Object.keys(updateObj).length && roomModel) {
         await roomModel.findByIdAndUpdate(id, updateObj, { upsert: false }).catch(() => null);
@@ -717,6 +743,14 @@ router.post('/:id/ban', asyncHandler(async (req, res) => {
         const io = req.app.get('io');
         if (io) {
           io.to(id).emit('room:member-kicked', { roomId: id, targetUserId: targetUserId ? String(targetUserId) : null, targets: uniqueBannedIds });
+          
+          // Emit room:update so other members see the updated member list
+          const fresh = await roomModel.findById(id).lean().catch(() => null);
+          if (fresh) {
+            io.to(id).emit('room:update', { id: fresh._id, ...fresh });
+            // keep cache lightly in sync
+            try { rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh }); } catch (e) {}
+          }
         }
       } catch (e) {}
 
@@ -808,7 +842,13 @@ router.post('/:id/unban', asyncHandler(async (req, res) => {
   if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Only owner or admins can unban users' });
 
   const updateObj = {};
-  if (targetUserId) updateObj.$pull = { bannedUsers: String(targetUserId) };
+  if (targetUserId) {
+    const targetDoc = await User.findOne({ $or: [{ _id: String(targetUserId) }, { guestId: String(targetUserId) }] }).select('_id guestId email').lean().catch(() => null);
+    const idToExpand = targetDoc?._id || targetUserId;
+    const emailToExpand = targetDoc?.email || null;
+    const equivalents = await expandUserIdentifiers({ id: idToExpand, email: emailToExpand });
+    updateObj.$pull = { bannedUsers: { $in: uniqStrings(equivalents) } };
+  }
   if (ip) updateObj.$pull = Object.assign(updateObj.$pull || {}, { bannedIPs: String(ip) });
 
   if (!Object.keys(updateObj).length) return res.status(400).json({ message: 'targetUserId or ip required' });
@@ -901,6 +941,16 @@ router.post('/:id/leave', asyncHandler(async (req, res) => {
       const fresh = await roomModel.findById(id).lean().catch(() => null);
       if (fresh) {
         try { rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh }); } catch (e) {}
+        
+        const io = req.app.get('io');
+        if (io) {
+          io.to(id).emit('room:member-left', { roomId: id, userId: String(userId) });
+          // Also emit room:update to refresh member lists
+          io.to(id).emit('room:update', { id: fresh._id, ...fresh });
+          // Special kick event for the person who left/was removed
+          io.to(id).emit('room:member-kicked', { roomId: id, targetUserId: String(userId) });
+        }
+
         return res.json({ id: fresh._id, ...fresh });
       }
     } catch (e) {

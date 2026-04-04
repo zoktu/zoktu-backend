@@ -9,6 +9,7 @@ const UserSchema = new mongoose.Schema({
   displayName: String,
   name: String,
   userType: { type: String, default: 'registered' },
+  role: { type: String, enum: ['user', 'moderator', 'admin', 'superadmin'], default: 'user' },
   emailVerified: { type: Boolean, default: false },
   // Profile fields
   bio: { type: String, maxlength: 1000 },

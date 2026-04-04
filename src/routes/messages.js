@@ -30,44 +30,16 @@ const MAX_WORDS = 300; // maximum words allowed per message
 const BOT_ID = env.botId || 'bot-baka';
 const BOT_NAME = env.botName || 'Baka';
 const BOT_AVATAR = env.botAvatar || '';
-const BOT_MODEL = env.geminiModel || 'gemini-1.5-flash';
 const BOT_REPLY_COOLDOWN_MS = Number.isFinite(Number(env.botReplyCooldownMs))
   ? Number(env.botReplyCooldownMs)
   : 6000;
-const BOT_ENABLED = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
+const BOT_ENABLED = Boolean(env.huggingFaceApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
 const botLastReplyByRoom = new Map();
 const BOT_UNSAFE_PATTERN = /(kill yourself|self-harm|suicide|rape|terrorist|nazi)/i;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const getDisappearingDurationMs = (roomDoc) => {
-  try {
-    const cfg = roomDoc?.settings?.disappearingMessages;
-    if (!cfg || cfg.enabled !== true) return null;
-    const days = Number(cfg.duration || 0);
-    if (!Number.isFinite(days) || days <= 0) return null;
-    return days * DAY_MS;
-  } catch (e) {
-    return null;
-  }
-};
 
-const pruneExpiredDisappearingMessages = async ({ Model, roomId, roomDoc }) => {
-  try {
-    const durationMs = getDisappearingDurationMs(roomDoc);
-    if (!durationMs) return;
-    const cutoff = new Date(Date.now() - durationMs);
-
-    await Model.deleteMany({
-      roomId: String(roomId),
-      createdAt: { $lt: cutoff },
-      type: { $ne: 'system' },
-      'meta.pinned': { $ne: true }
-    }).exec();
-  } catch (e) {
-    // best-effort
-  }
-};
 
 const getRoomDocById = async (id, select = null) => {
   if (!id) return null;
@@ -186,37 +158,45 @@ const sanitizeBotText = (text) => {
   return raw.length > 600 ? raw.slice(0, 600).trim() : raw;
 };
 
-const fetchGeminiReply = async ({ promptText }) => {
-  if (!env.geminiApiKey) return null;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(BOT_MODEL)}:generateContent?key=${env.geminiApiKey}`;
-  const body = {
-    contents: [{
-      role: 'user',
-      parts: [{ text: promptText }]
-    }],
-    generationConfig: {
-      temperature: 0.7,
-      topP: 0.9,
-      maxOutputTokens: 160
-    },
-    safetySettings: [
-      { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-      { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-      { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-      { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' }
-    ]
-  };
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) {
+const fetchHuggingFaceReply = async ({ promptText }) => {
+  if (!env.huggingFaceApiKey) return null;
+  const modelId = env.huggingFaceModel || 'mistralai/Mistral-7B-Instruct-v0.3';
+  const url = `https://api-inference.huggingface.co/models/${encodeURIComponent(modelId)}`;
+  
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.huggingFaceApiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        inputs: promptText,
+        parameters: {
+          max_new_tokens: 160,
+          temperature: 0.7,
+          repetition_penalty: 1.1,
+          return_full_text: false
+        }
+      })
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    
+    // Hugging Face returns an array or object depending on the model
+    let text = "";
+    if (Array.isArray(data) && data[0]?.generated_text) {
+      text = data[0].generated_text;
+    } else if (data?.generated_text) {
+      text = data.generated_text;
+    }
+
+    if (!text) return null;
+    return sanitizeBotText(text);
+  } catch (e) {
     return null;
   }
-  const data = await res.json().catch(() => null);
-  const text = data?.candidates?.[0]?.content?.parts?.map((p) => p?.text).filter(Boolean).join(' ');
-  return sanitizeBotText(text);
 };
 
 const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
@@ -239,7 +219,7 @@ const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
       `User (${userName || 'User'}): ${rawMessage}`
     ].join(' ');
 
-    const reply = await fetchGeminiReply({ promptText });
+    const reply = await fetchHuggingFaceReply({ promptText });
     const safeReply = reply || "I'm having trouble responding right now. Try again in a moment.";
     if (!safeReply) return;
 
@@ -662,21 +642,7 @@ router.get('/rooms/:roomId/messages', (req, res) => {
     try {
       const roomDoc = await getRoomDocById(roomId);
       const Model = getModelForRoom(roomDoc);
-      await pruneExpiredDisappearingMessages({ Model, roomId, roomDoc });
-
-      const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
-      const before = req.query.before; // cursor for pagination (messageId or timestamp)
-      const durationMs = getDisappearingDurationMs(roomDoc);
-      const cutoff = durationMs ? new Date(Date.now() - durationMs) : null;
-
       let query = { roomId };
-      if (cutoff) {
-        query.$or = [
-          { createdAt: { $gte: cutoff } },
-          { type: 'system' },
-          { 'meta.pinned': true }
-        ];
-      }
       if (before) {
         // Fetch messages older than the cursor
         try {
@@ -718,8 +684,6 @@ router.get('/rooms/:roomId/messages', (req, res) => {
         if (currentUserIds.length && Array.isArray(meta.viewed)) {
           viewedEntry = meta.viewed.find(v => currentUserIds.includes(String(v.userId))) || null;
         }
-        const expireAt = viewedEntry ? (viewedEntry.expireAt ? new Date(viewedEntry.expireAt).toISOString() : null) : null;
-        const expiredForYou = expireAt ? (Date.now() > new Date(expireAt).getTime()) : false;
         return ({
           id: d._id.toString(),
           roomId: d.roomId,
@@ -737,9 +701,7 @@ router.get('/rooms/:roomId/messages', (req, res) => {
           editedAt: d.editedAt,
           reactions: Array.isArray(d.reactions) ? d.reactions : [],
           meta,
-          viewedByCurrentUser: Boolean(viewedEntry),
-          expireAt,
-          expiredForCurrentUser: expiredForYou
+          viewedByCurrentUser: Boolean(viewedEntry)
         });
       });
       res.json(mapped);
@@ -869,6 +831,20 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   const auth = await getAuthIdentity(req);
   if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
 
+  const roomDoc = await getRoomDocById(roomId);
+  if (!roomDoc) return res.status(404).json({ message: 'Room not found' });
+
+  // Only admins can send messages check
+  if (!isDmRoomDoc(roomDoc) && roomDoc.settings && roomDoc.settings.onlyAdminsCanSendMessages) {
+    const ownerId = roomDoc.owner ? String(roomDoc.owner) : null;
+    const adminIds = Array.isArray(roomDoc.admins) ? roomDoc.admins.map(String) : [];
+    const isModerator = (ownerId && auth.ids.includes(ownerId)) || adminIds.some(a => auth.ids.includes(String(a)));
+    
+    if (!isModerator) {
+      return res.status(403).json({ message: 'Only admins can send messages in this room' });
+    }
+  }
+
   // Prevent spoofing senderId; if provided senderId isn't one of your equivalent ids, fall back to canonical id.
   const senderIdEffective = (senderId && auth.ids.includes(String(senderId))) ? String(senderId) : String(auth.primary);
 
@@ -889,7 +865,7 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
 
   // Duplicate message spam check (block same message sent repeatedly in short interval)
   try {
-    const Model = getModelForRoom(await getRoomDocById(roomId));
+    const Model = getModelForRoom(roomDoc);
     // Find last 2 messages by this user in this room
     const recentMsgs = await Model.find({
       roomId,
@@ -921,7 +897,6 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   // Check room-level bans/mutes (by userId or IP)
   try {
     const ip = (req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.ip || '').toString().split(',')[0].trim();
-    const roomDoc = await getRoomDocById(roomId);
     if (roomDoc) {
       // check direct userId ban
       if (Array.isArray(roomDoc.bannedUsers) && auth?.ids?.length) {
@@ -965,9 +940,6 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   if (muteStart) {
     return res.status(403).json({ message: 'You have been muted for 5 minutes due to spam', mutedUntil: muteStart });
   }
-
-  // persist to DB using correct model for the room
-  const roomDoc = await getRoomDocById(roomId);
 
   // Profanity / explicit content check - block messages containing disallowed tokens
   try {
@@ -1293,33 +1265,30 @@ router.delete('/messages/:id', asyncHandler(async (req, res) => {
 
   if (!isSender && !isModerator) return res.status(403).json({ message: 'Forbidden' });
 
-  // Soft-delete so all clients see "Message deleted" via polling.
+  // Hard-delete from DB and broadcast instantly via socket.
   try {
-    const meta = doc.meta || {};
-    meta.deleted = true;
-    meta.deletedAt = new Date();
-    meta.deletedBy = String(auth.primary);
-    doc.meta = meta;
-    doc.content = '';
-    await doc.save();
+    const roomIdStr = String(doc.roomId);
+    await Model.deleteOne({ _id: doc._id });
 
-    // Best-effort: keep in-memory cache consistent if it exists
+    // Remove from in-memory cache too
     try {
-      const list = messages.get(String(doc.roomId)) || [];
-      const idx = list.findIndex(m => String(m.id) === String(id));
-      if (idx !== -1) {
-        list[idx] = { ...list[idx], content: '', meta: { ...(list[idx].meta || {}), deleted: true, deletedAt: meta.deletedAt, deletedBy: meta.deletedBy } };
-        messages.set(String(doc.roomId), list);
+      const list = messages.get(roomIdStr) || [];
+      const filtered = list.filter(m => String(m.id) !== String(id));
+      messages.set(roomIdStr, filtered);
+    } catch (e) {}
+
+    // Broadcast instant delete to all room clients
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.to(roomIdStr).emit('room:message:deleted', { id, roomId: roomIdStr });
       }
     } catch (e) {}
 
-    return res.json({ message: 'deleted', id, soft: true });
+    return res.json({ message: 'deleted', id, soft: false });
   } catch (e) {
-    // fall through to hard-delete
+    return res.status(500).json({ message: 'Delete failed' });
   }
-
-  await Model.deleteOne({ _id: doc._id });
-  res.json({ message: 'deleted', id, soft: false });
 }));
 
 router.post('/messages/:id/reactions', asyncHandler(async (req, res) => {

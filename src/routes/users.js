@@ -280,7 +280,7 @@ router.get('/:id', asyncHandler(async (req, res) => {
   // Final fallback for guests not yet in DB
   const fallback = { 
     id: req.params.id, 
-    displayName: 'Guest', 
+    displayName: req.params.id.startsWith('guest-') ? `Guest-${req.params.id.split('-').slice(-1)[0]}` : 'Guest', 
     userType: 'guest',
     roomsCount: 0,
     karma: 0,

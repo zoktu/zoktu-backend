@@ -13,12 +13,14 @@ import reportsRoutes from './reports.js';
 import sessionsRoutes from './sessions.js';
 import notificationsRoutes from './notifications.js';
 import paymentsRoutes from './payments.js';
+import adminRoutes from './admin.js';
 
 const router = Router();
-
+// ... (rest of the imports)
 router.use('/auth', authRoutes);
 router.use('/users', usersRoutes);
 router.use('/rooms', roomsRoutes);
+router.use('/admin', adminRoutes);
 router.use('/', sitemapRoutes);
 router.use('/', messagesRoutes);
 router.use('/', encryptedRoutes);

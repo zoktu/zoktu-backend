@@ -23,8 +23,8 @@ export const env = {
   clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
   // Prefer explicit backend origin for building API links (e.g., email verification)
   apiOrigin: process.env.API_ORIGIN || process.env.BACKEND_ORIGIN || '',
-  geminiApiKey: process.env.GEMINI_API_KEY || '',
-  geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+  huggingFaceApiKey: process.env.HUGGINGFACE_API_KEY || '',
+  huggingFaceModel: process.env.HUGGINGFACE_MODEL || 'mistralai/Mistral-7B-Instruct-v0.3',
   botName: process.env.BOT_NAME || 'Baka',
   botId: process.env.BOT_ID || 'bot-baka',
   botAvatar: process.env.BOT_AVATAR || process.env.BOT_AVATAR_URL || '',
@@ -36,7 +36,8 @@ export const env = {
   maxmindDbPath: process.env.MAXMIND_DB_PATH || '',
   ipIntelStrictness: process.env.IPINTEL_STRICTNESS || '1',
   ipIntelAllowPublicAccessPoints: process.env.IPINTEL_ALLOW_PUBLIC_ACCESS_POINTS || 'true',
-  ipIntelFraudBlockScore: process.env.IPINTEL_FRAUD_BLOCK_SCORE || '85'
+  ipIntelFraudBlockScore: process.env.IPINTEL_FRAUD_BLOCK_SCORE || '85',
+  superAdminEmail: process.env.SUPER_ADMIN_EMAIL || 'rohitbansal23rk@gmail.com'
 };
 
 // Backward-compatible aliases used in existing code.

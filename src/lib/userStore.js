@@ -43,7 +43,7 @@ export function updateUserPresenceInMemory(userId, isOnline) {
   }
 }
 
-export function upsertUserInMemory(docOrUser) {
+export function upsertUserInMemory(docOrUser, persist = false) {
   if (!docOrUser) return null;
   const id = String(docOrUser._id || docOrUser.id || '').trim();
   const guestId = docOrUser.guestId ? String(docOrUser.guestId) : null;
@@ -69,6 +69,10 @@ export function upsertUserInMemory(docOrUser) {
     }
   } catch (e) {
     // ignore
+  }
+
+  if (persist) {
+    persistUserToDb(entry).catch(() => null);
   }
 
   return entry;

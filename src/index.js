@@ -8,13 +8,9 @@ import { connectDb } from './config/db.js';
 import routes from './routes/index.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { createServer } from 'http';
-import { Server as IOServer } from 'socket.io';
-import { messages } from './routes/messages.js';
-import { updateUserPresenceInMemory, upsertUserInMemory } from './lib/userStore.js';
-import Message from './models/Message.js';
-import Room from './models/Room.js';
-import DMRoom from './models/DMRoom.js';
 import User from './models/User.js';
+import { checkGlobalBan } from './middleware/globalBanMiddleware.js';
+import GlobalBan from './models/GlobalBan.js';
 import { containsBlockedExternalLink } from './middleware/profanityFilter.js';
 
 const app = express();
@@ -64,7 +60,7 @@ app.get('/', (req, res) => {
   });
 });
 
-app.use('/api', routes);
+app.use('/api', checkGlobalBan, routes);
 
 app.use((req, res) => {
   res.status(404).json({ message: 'Not found' });
@@ -170,10 +166,28 @@ io.on('connection', (socket) => {
   const userId = socket.handshake.query?.userId || socket.handshake.auth?.userId || null;
   const effectiveUserId = userId ? String(userId) : null;
   if (effectiveUserId) {
-    socketsByUser.set(effectiveUserId, socket);
-    socketCountByUser.set(effectiveUserId, (socketCountByUser.get(effectiveUserId) || 0) + 1);
-    markUserPresence(effectiveUserId, true);
-    io.emit('presence:update', { userId: effectiveUserId, isOnline: true });
+    // Check if user or IP is globally banned
+    const ip = socket.handshake.address;
+    (async () => {
+      const isBanned = await GlobalBan.findOne({
+        $or: [
+          { userId: effectiveUserId },
+          { ip }
+        ],
+        $or: [{ expiresAt: { $exists: false } }, { expiresAt: null }, { expiresAt: { $gt: new Date() } }]
+      }).lean();
+
+      if (isBanned) {
+        socket.emit('global:kick', { reason: isBanned.reason });
+        socket.disconnect(true);
+        return;
+      }
+      
+      socketsByUser.set(effectiveUserId, socket);
+      socketCountByUser.set(effectiveUserId, (socketCountByUser.get(effectiveUserId) || 0) + 1);
+      markUserPresence(effectiveUserId, true);
+      io.emit('presence:update', { userId: effectiveUserId, isOnline: true });
+    })();
   }
 
   // Allow clients (REST-created rooms/DMs) to join a room for realtime events
@@ -398,7 +412,7 @@ io.on('connection', (socket) => {
             id: doc._id.toString(), 
             roomId, 
             senderId, 
-            senderName: isRandom ? 'Stranger' : (doc.senderName || 'User'), 
+            senderName: isRandom ? 'Stranger' : (doc.senderName || senderId || 'User'), 
             content: doc.content, 
             timestamp: doc.createdAt.toISOString() 
           };
@@ -448,7 +462,7 @@ const start = async () => {
     const botId = env.botId || 'bot-baka';
     const botName = env.botName || 'Baka';
     const botAvatar = env.botAvatar || '';
-    const botEnabled = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
+    const botEnabled = Boolean(env.huggingFaceApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
     if (botEnabled) {
       const doc = await User.findOneAndUpdate(
         { guestId: String(botId) },
