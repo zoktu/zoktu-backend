@@ -12,7 +12,5 @@ const GlobalBanSchema = new mongoose.Schema({
 // Compound index for unique ban pairs if needed, or just individual indexes.
 // We allow multiple bans per IP/User for logging history, but the middleware 
 // will check for any active ban.
-GlobalBanSchema.index({ userId: 1 });
-GlobalBanSchema.index({ ip: 1 });
 
 export default mongoose.models.GlobalBan || mongoose.model('GlobalBan', GlobalBanSchema);
