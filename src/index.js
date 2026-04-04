@@ -3,15 +3,19 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import compression from 'compression';
+import { Server as IOServer } from 'socket.io';
 import { env } from './config/env.js';
 import { connectDb } from './config/db.js';
 import routes from './routes/index.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { createServer } from 'http';
 import User from './models/User.js';
+import Room from './models/Room.js';
+import DMRoom from './models/DMRoom.js';
 import { checkGlobalBan } from './middleware/globalBanMiddleware.js';
 import GlobalBan from './models/GlobalBan.js';
 import { containsBlockedExternalLink } from './middleware/profanityFilter.js';
+import { upsertUserInMemory, updateUserPresenceInMemory } from './lib/userStore.js';
 
 const app = express();
 
@@ -79,6 +83,7 @@ app.set('io', io);
 const socketsByUser = new Map(); // userId -> socket
 const socketCountByUser = new Map(); // userId -> count (supports multiple tabs/devices)
 const waitingSockets = [];
+const messages = new Map(); // roomId -> message[]
 // Per-user message rate tracking and mute map (same rules as REST)
 const userMessageWindow = new Map(); // userId -> { count, windowStart }
 const mutedUsers = new Map(); // userId -> muteUntil timestamp
