@@ -39,7 +39,14 @@ router.post('/create-order', requireAuth, async (req, res) => {
     // Build customer details from authenticated user (prevent client tampering)
     const customerId = req.user?.id || req.user?._id || req.user?.userId || null;
     // Load full user profile to validate emailVerified and phone
-    const profile = customerId ? await User.findById(customerId).lean().exec() : null;
+    let profile = null;
+    if (customerId) {
+      const qOr = [{ guestId: String(customerId) }, { email: String(customerId) }];
+      if (/^[0-9a-fA-F]{24}$/.test(String(customerId))) {
+        qOr.push({ _id: customerId });
+      }
+      profile = await User.findOne({ $or: qOr }).lean().exec();
+    }
     if (!profile) return res.status(400).json({ message: 'Invalid user' });
     if (!profile.emailVerified) return res.status(403).json({ message: 'Only email-verified users can purchase Premium' });
 
@@ -153,7 +160,11 @@ router.get('/return', async (req, res) => {
     if (status === 'PAID') {
       const customerId = data.customer_details?.customer_id;
       if (customerId) {
-        const user = await User.findOne({ $or: [{ _id: customerId }, { guestId: customerId }, { email: customerId }] }).exec();
+        const qOr = [{ guestId: String(customerId) }, { email: String(customerId) }];
+        if (/^[0-9a-fA-F]{24}$/.test(String(customerId))) {
+          qOr.push({ _id: customerId });
+        }
+        const user = await User.findOne({ $or: qOr }).exec();
         if (user) {
           const premiumUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
           // If the order document indicates the user consented to save phone, fetch it and update
@@ -264,7 +275,11 @@ router.post('/webhook', async (req, res) => {
         const ord = await Order.findOne({ orderId }).lean().exec();
         const customerId = ord?.customerId || payload.customer_details?.customer_id || payload.data?.customer_id || '';
         if (customerId) {
-          const user = await User.findOne({ $or: [{ _id: customerId }, { guestId: customerId }, { email: customerId }] }).exec();
+          const qOr = [{ guestId: String(customerId) }, { email: String(customerId) }];
+          if (/^[0-9a-fA-F]{24}$/.test(String(customerId))) {
+            qOr.push({ _id: customerId });
+          }
+          const user = await User.findOne({ $or: qOr }).exec();
           if (user) {
             const premiumUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
             // Save phone to profile only if user consented during checkout
