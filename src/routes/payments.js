@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { env } from '../config/env.js';
 import fetch from 'node-fetch';
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 import User from '../models/User.js';
 import Order from '../models/Order.js';
 import { sendMail } from '../lib/mailer.js';
@@ -43,7 +44,7 @@ router.post('/create-order', requireAuth, async (req, res) => {
     if (customerId) {
       const qOr = [{ guestId: String(customerId) }, { email: String(customerId) }];
       if (/^[0-9a-fA-F]{24}$/.test(String(customerId))) {
-        qOr.push({ _id: customerId });
+        qOr.push({ _id: new mongoose.Types.ObjectId(String(customerId)) });
       }
       profile = await User.findOne({ $or: qOr }).lean().exec();
     }
@@ -162,7 +163,7 @@ router.get('/return', async (req, res) => {
       if (customerId) {
         const qOr = [{ guestId: String(customerId) }, { email: String(customerId) }];
         if (/^[0-9a-fA-F]{24}$/.test(String(customerId))) {
-          qOr.push({ _id: customerId });
+          qOr.push({ _id: new mongoose.Types.ObjectId(String(customerId)) });
         }
         const user = await User.findOne({ $or: qOr }).exec();
         if (user) {
@@ -277,7 +278,7 @@ router.post('/webhook', async (req, res) => {
         if (customerId) {
           const qOr = [{ guestId: String(customerId) }, { email: String(customerId) }];
           if (/^[0-9a-fA-F]{24}$/.test(String(customerId))) {
-            qOr.push({ _id: customerId });
+            qOr.push({ _id: new mongoose.Types.ObjectId(String(customerId)) });
           }
           const user = await User.findOne({ $or: qOr }).exec();
           if (user) {
