@@ -98,12 +98,66 @@ const getRequestIp = (req) => {
   // prefer X-Forwarded-For when behind proxies
   const xff = req.headers['x-forwarded-for'];
   if (xff && typeof xff === 'string') {
-    return xff.split(',')[0].trim();
+    const list = xff.split(',').map(s => s.trim()).filter(Boolean);
+    if (list[0]) return list[0];
   }
 
-  const rawIp = req.ip || req.connection?.remoteAddress || null;
-  return typeof rawIp === 'string' ? rawIp.replace('::ffff:', '') : rawIp;
+  return req.socket.remoteAddress || '';
 };
+
+/**
+ * Internal helper to check if a user's premium subscription has expired.
+ * If expired, it updates both the MongoDB document and the in-memory cache.
+ */
+const checkPremiumExpiration = async (userDoc) => {
+  if (!userDoc || !userDoc.isPremium || !userDoc.premiumUntil) return userDoc;
+
+  const now = new Date();
+  const expiry = new Date(userDoc.premiumUntil);
+
+  if (now > expiry) {
+    try {
+      console.log(`[Premium] VIP Expiring for user: ${userDoc._id || userDoc.id || 'unknown'}`);
+      
+      // Update MongoDB (atomic)
+      await User.updateOne(
+        { _id: userDoc._id },
+        { $set: { isPremium: false, premiumStatus: 'free' } }
+      ).exec();
+
+      // Mutate local object to reflect change in the current request response
+      userDoc.isPremium = false;
+      userDoc.premiumStatus = 'free';
+
+      // Synchronize in-memory user store/cache
+      const emailKey = userDoc.email ? String(userDoc.email).trim().toLowerCase() : null;
+      if (emailKey && users.has(emailKey)) {
+        const cached = users.get(emailKey);
+        if (cached) {
+          cached.isPremium = false;
+          cached.premiumStatus = 'free';
+          users.set(emailKey, cached);
+        }
+      }
+      
+      // Also try sync by ID/guestId if available
+      const idKey = String(userDoc.id || userDoc._id || '').trim();
+      if (idKey && users.has(idKey)) {
+        const cached = users.get(idKey);
+        if (cached) {
+          cached.isPremium = false;
+          cached.premiumStatus = 'free';
+          users.set(idKey, cached);
+        }
+      }
+    } catch (e) {
+      console.warn('⚠️ Failed to auto-expire premium status', e?.message || e);
+    }
+  }
+
+  return userDoc;
+};
+
 
 const resolveClientOrigin = () => {
   const raw = String(env.clientOrigin || '').trim();
@@ -637,6 +691,14 @@ router.post('/login', asyncHandler(async (req, res) => {
 
   const ok = await bcrypt.compare(password, user.password);
   if (!ok) return res.status(401).json({ message: 'invalid credentials' });
+  
+  // Check for VIP expiration during login
+  try {
+    await checkPremiumExpiration(user);
+  } catch (e) {
+    // non-fatal
+  }
+
   const hadPendingDeletion = Boolean(user.deletePending);
   if (hadPendingDeletion) {
     delete user.deletePending;
@@ -843,6 +905,12 @@ router.get('/me', asyncHandler(async (req, res) => {
     }
     if (doc) {
       user = upsertUserInMemory({ ...doc, id: String(doc.guestId || doc._id) });
+      // Check for VIP expiration during profile refresh (/me)
+      try {
+        await checkPremiumExpiration(user);
+      } catch (e) {
+        // non-fatal
+      }
     }
   } catch (e) {
     // ignore

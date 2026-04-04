@@ -175,11 +175,13 @@ router.get('/return', async (req, res) => {
         }
         const user = await User.findOne({ $or: qOr }).exec();
         if (user) {
-          const premiumUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+          const days = (ord?.plan === 'yearly') ? 365 : 30;
+          const premiumUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
           let updateObj = {
             isPremium: true,
             userType: 'premium',
             premiumUntil,
+            premiumStatus: ord?.plan || 'monthly',
             subscription: {
               provider: 'cashfree',
               orderId: String(order_id),
@@ -267,11 +269,13 @@ router.post('/webhook', async (req, res) => {
           }
           const user = await User.findOne({ $or: qOr }).exec();
           if (user) {
-            const premiumUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+            const days = (ord?.plan === 'yearly') ? 365 : 30;
+            const premiumUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
             let updateObj = {
               isPremium: true,
               userType: 'premium',
               premiumUntil,
+              premiumStatus: ord?.plan || 'monthly',
               subscription: { provider: 'cashfree', orderId: String(orderId), plan: ord?.plan || 'premium', amount: ord?.amount || '' }
             };
             if (ord?.savePhoneConsent && ord?.customerPhone) {
