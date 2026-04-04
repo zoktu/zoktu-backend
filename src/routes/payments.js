@@ -178,6 +178,7 @@ router.get('/return', async (req, res) => {
           const premiumUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
           let updateObj = {
             isPremium: true,
+            userType: 'premium',
             premiumUntil,
             subscription: {
               provider: 'cashfree',
@@ -269,6 +270,7 @@ router.post('/webhook', async (req, res) => {
             const premiumUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
             let updateObj = {
               isPremium: true,
+              userType: 'premium',
               premiumUntil,
               subscription: { provider: 'cashfree', orderId: String(orderId), plan: ord?.plan || 'premium', amount: ord?.amount || '' }
             };
