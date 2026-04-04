@@ -149,6 +149,7 @@ router.get('/return', async (req, res) => {
   try {
     const order_id = req.query.order_id || req.query.orderId || req.query.order;
     if (!order_id) return res.status(400).send('Missing order_id');
+
     const resp = await cashfreeFetch(`/pg/orders/${encodeURIComponent(String(order_id))}`, { method: 'GET' });
     if (!resp.ok) {
       console.error('payments:return fetch failed', resp.status, resp.data);
@@ -157,9 +158,16 @@ router.get('/return', async (req, res) => {
     const data = resp.data || resp;
     const status = (data.order_status || data.orderStatus || data.status || '').toString().toUpperCase();
 
-    // If paid, find user by customer_id (expected to be passed in create-order's customer_details.customer_id)
+    // 1. Update Order in our DB immediately
+    const ord = await Order.findOneAndUpdate(
+      { orderId: String(order_id) },
+      { $set: { status: status === 'PAID' ? 'PAID' : (status === 'FAILED' ? 'FAILED' : 'PENDING'), rawResponse: data } },
+      { new: true }
+    ).lean().exec();
+
+    // 2. If PAID, find user and activate VIP
     if (status === 'PAID') {
-      const customerId = data.customer_details?.customer_id;
+      const customerId = ord?.customerId || data.customer_details?.customer_id;
       if (customerId) {
         const qOr = [{ guestId: String(customerId) }, { email: String(customerId) }];
         if (/^[0-9a-fA-F]{24}$/.test(String(customerId))) {
@@ -168,70 +176,46 @@ router.get('/return', async (req, res) => {
         const user = await User.findOne({ $or: qOr }).exec();
         if (user) {
           const premiumUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
-          // If the order document indicates the user consented to save phone, fetch it and update
           let updateObj = {
             isPremium: true,
             premiumUntil,
             subscription: {
               provider: 'cashfree',
               orderId: String(order_id),
-              plan: 'premium',
-              amount: String(data.order_amount || data.amount || '')
+              plan: ord?.plan || 'premium',
+              amount: String(data.order_amount || data.amount || ord?.amount || '')
             }
           };
-          try {
-            const ord = await Order.findOne({ orderId: String(order_id) }).lean().exec();
-            if (ord?.savePhoneConsent && ord?.customerPhone) {
-              updateObj = { ...updateObj, phone: ord.customerPhone };
-            }
-          } catch (e) {}
+          if (ord?.savePhoneConsent && ord?.customerPhone) {
+            updateObj.phone = ord.customerPhone;
+          }
 
-          await User.findByIdAndUpdate(user._id, {
-            $set: updateObj
-          }).exec();
+          await User.findByIdAndUpdate(user._id, { $set: updateObj }).exec();
 
           // Send confirmation email
           try {
             const to = user.email;
             if (to) {
               const subject = 'Your Zoktu Premium is active 🎉';
-              const features = [
-                'Ad-free experience',
-                'Priority customer support',
-                'Premium badge & profile themes',
-                'Advanced chat features & emojis',
-                'Enhanced privacy controls',
-                'Custom chat themes & colors',
-                'Early access to new features'
-              ];
               const html = `<p>Hi ${user.displayName || user.username || ''},</p>
-                <p>Your payment was successful and your <strong>Zoktu Premium</strong> subscription is now active. You will have access to the following features:</p>
-                <ul>${features.map(f => `<li>${f}</li>`).join('')}</ul>
+                <p>Your payment was successful and your <strong>Zoktu Premium</strong> subscription is now active.</p>
                 <p>Order ID: ${order_id}</p>
-                <p>If you did not authorize this payment, please contact support.</p>
                 <p>— Zoktu Team</p>`;
               await sendMail({ to, subject, html, text: `Your Zoktu Premium is active. Order: ${order_id}` });
             }
-          } catch (e) {
-            console.warn('payments:return - failed to send confirmation email', e?.message || e);
-          }
+          } catch (e) {}
         }
       }
     }
 
-    // Redirect user back to frontend return URL with order status
-    const target = env.cashfreeReturnUrl || 'https://zoktu.com';
-    try {
-      const url = new URL(target);
-      url.searchParams.set('order_id', String(order_id));
-      url.searchParams.set('status', String(status));
-      return res.redirect(url.toString());
-    } catch (e) {
-      // fallback: simple redirect
-      return res.redirect(`${target}?order_id=${encodeURIComponent(String(order_id))}&status=${encodeURIComponent(String(status))}`);
-    }
+    // Redirect user back to frontend
+    const target = env.cashfreeReturnUrl || 'https://zoktu.com/dashboard';
+    const redirectUrl = new URL(target);
+    redirectUrl.searchParams.set('order_id', String(order_id));
+    redirectUrl.searchParams.set('status', status);
+    return res.redirect(redirectUrl.toString());
   } catch (e) {
-    console.error('payments:return error', e?.response?.data || e);
+    console.error('payments:return error', e);
     return res.status(500).send('Error verifying order');
   }
 });
@@ -265,15 +249,15 @@ router.post('/webhook', async (req, res) => {
       return res.status(400).send('Missing order id');
     }
 
-    // Update order record
-    try {
-      await Order.findOneAndUpdate({ orderId }, { $set: { status: status || 'PENDING', rawResponse: payload } }).catch(() => {});
-    } catch (e) {}
+    // Update order record and get local data
+    const ord = await Order.findOneAndUpdate(
+      { orderId },
+      { $set: { status: status === 'PAID' ? 'PAID' : (status === 'FAILED' ? 'FAILED' : 'PENDING'), rawResponse: payload } },
+      { new: true }
+    ).lean().exec();
 
     if (status === 'PAID') {
-      // fetch order to get customer info
       try {
-        const ord = await Order.findOne({ orderId }).lean().exec();
         const customerId = ord?.customerId || payload.customer_details?.customer_id || payload.data?.customer_id || '';
         if (customerId) {
           const qOr = [{ guestId: String(customerId) }, { email: String(customerId) }];
@@ -283,15 +267,14 @@ router.post('/webhook', async (req, res) => {
           const user = await User.findOne({ $or: qOr }).exec();
           if (user) {
             const premiumUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-            // Save phone to profile only if user consented during checkout
             let updateObj = {
               isPremium: true,
               premiumUntil,
               subscription: { provider: 'cashfree', orderId: String(orderId), plan: ord?.plan || 'premium', amount: ord?.amount || '' }
             };
-            try {
-              if (ord?.savePhoneConsent && ord?.customerPhone) updateObj = { ...updateObj, phone: ord.customerPhone };
-            } catch (e) {}
+            if (ord?.savePhoneConsent && ord?.customerPhone) {
+              updateObj.phone = ord.customerPhone;
+            }
 
             await User.findByIdAndUpdate(user._id, { $set: updateObj }).exec();
 
@@ -300,20 +283,9 @@ router.post('/webhook', async (req, res) => {
               const to = user.email;
               if (to) {
                 const subject = 'Your Zoktu Premium is active 🎉';
-                const features = [
-                  'Ad-free experience',
-                  'Priority customer support',
-                  'Premium badge & profile themes',
-                  'Advanced chat features & emojis',
-                  'Enhanced privacy controls',
-                  'Custom chat themes & colors',
-                  'Early access to new features'
-                ];
                 const html = `<p>Hi ${user.displayName || user.username || ''},</p>
-                  <p>Your payment was successful and your <strong>Zoktu Premium</strong> subscription is now active. You will have access to the following features:</p>
-                  <ul>${features.map(f => `<li>${f}</li>`).join('')}</ul>
+                  <p>Your payment was successful and your <strong>Zoktu Premium</strong> subscription is now active.</p>
                   <p>Order ID: ${orderId}</p>
-                  <p>If you did not authorize this payment, please contact support.</p>
                   <p>— Zoktu Team</p>`;
                 await sendMail({ to, subject, html, text: `Your Zoktu Premium is active. Order: ${orderId}` });
               }
