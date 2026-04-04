@@ -52,8 +52,14 @@ if (sendgridEnabled) {
   console.log('ℹ️ SMTP disabled (set SMTP_ENABLED=true to enable outgoing emails).');
 }
 
-export async function sendMail({ to, subject, text, html, from }) {
-  const resolvedFrom = from || smtpConfig.from;
+export async function sendMail({ to, subject, text, html, from, replyTo }) {
+  let resolvedFrom = from || smtpConfig.from;
+
+  // Improve deliverability for Yahoo/Outlook by ensuring the from address is fully qualified
+  // If the from address is just an email (e.g., "noreply@domain.com") without a Name, wrap it.
+  if (resolvedFrom && !resolvedFrom.includes('<') && resolvedFrom.includes('@')) {
+    resolvedFrom = `"Zoktu" <${resolvedFrom}>`;
+  }
 
   if (sendgridEnabled) {
     return sgMail.send({
@@ -61,7 +67,8 @@ export async function sendMail({ to, subject, text, html, from }) {
       from: resolvedFrom,
       subject,
       text,
-      html
+      html,
+      replyTo: replyTo || resolvedFrom
     });
   }
 
@@ -74,7 +81,8 @@ export async function sendMail({ to, subject, text, html, from }) {
     to,
     subject,
     text,
-    html
+    html,
+    replyTo: replyTo || resolvedFrom
   };
   return transporter.sendMail(mailOptions);
 }
