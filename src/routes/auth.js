@@ -757,10 +757,6 @@ router.post('/guest', asyncHandler(async (req, res) => {
     // fail-open
   }
 
-  // Quick in-memory check (fast-fail), but we must also use an atomic DB upsert
-  if (guestUsernames.has(username.toLowerCase())) {
-    return res.status(409).json({ message: 'Username already taken' });
-  }
 
   // Prevent guest creation if a registered user already has this displayName (case-insensitive)
   // Check in-memory first
