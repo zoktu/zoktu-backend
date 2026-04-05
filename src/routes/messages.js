@@ -404,6 +404,41 @@ const buildLocalBotFallbackReply = ({ userMessage, userName, previousBotReply })
   return pick(options, 'Haanji 😄 aur bolo, maza aa raha hai.');
 };
 
+const buildInstantIntentReply = ({ userMessage, userName, previousBotReply }) => {
+  const raw = String(userMessage || '').replace(/\s+/g, ' ').trim();
+  const lower = raw.toLowerCase();
+  const safeUserName = String(userName || '').trim() || 'yaar';
+  const pick = (options, fallbackText) => pickNonRepeatingReply(options, previousBotReply, fallbackText);
+
+  if (!raw) return null;
+
+  if (/(^|\b)(tera|tumhara|aapka|your|what\s*is\s*your|what'?s\s*your|who\s*are\s*you|naam\s*kya)(\b|$)/i.test(lower) && /(naam|name|who)/i.test(lower)) {
+    return pick([
+      `${BOT_NAME} hoon ji 😄 aur tum mujhe kya bulaoge, ${safeUserName}?`,
+      `Mera naam ${BOT_NAME} hai ✨ tumne pucha toh dil khush ho gaya.`,
+      `${BOT_NAME} here 😉 ab tum apna cute intro bhi do na.`
+    ], `${BOT_NAME} hoon ji 😄 aur tum mujhe kya bulaoge, ${safeUserName}?`);
+  }
+
+  if (/(nind|neend|sleep|sona|so\s*ja|so\s*raha|so\s*rahi|thak|tired|sleepy)/i.test(lower)) {
+    return pick([
+      'Aww sleepy mode? 😴 paani piyo, phir cozy sa nap le lo cutie.',
+      'Neend aa rahi hai toh phone side pe rakho aur thoda rest karo ✨ good human.',
+      'Sleepy ho? 😌 chalo ek virtual goodnight hug aur seedha so jao.'
+    ], 'Neend aa rahi hai toh phone side pe rakho aur thoda rest karo ✨ good human.');
+  }
+
+  if (/(\bbf\b|\bgf\b|boyfriend|girlfriend|single|relationship\s*status|partner)/i.test(lower)) {
+    return pick([
+      'BF? फिलहाल toh nahi 😄 abhi tumse chat karke mood set hai.',
+      'Single vibes for now ✨ drama kam, masti zyada.',
+      'Abhi relationship se zyada fun convo chal rahi hai 😉 tum batao tumhara scene kya hai?'
+    ], 'Single vibes for now ✨ drama kam, masti zyada.');
+  }
+
+  return null;
+};
+
 const fetchHuggingFaceReply = async ({
   promptText,
   maxAttempts = 3,
@@ -538,20 +573,31 @@ const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
       `User (${userName || 'User'}): ${rawMessage}`
     ].filter(Boolean).join(' ');
 
-    const reply = await fetchHuggingFaceReply({
-      promptText,
-      maxAttempts: isDm ? 1 : 2,
-      maxTotalWaitMs: isDm ? 1300 : 2600,
-      perAttemptTimeoutMs: isDm ? 1000 : 1500
+    const instantIntentReply = buildInstantIntentReply({
+      userMessage: rawMessage,
+      userName,
+      previousBotReply
     });
-    let safeReply = sanitizeBotText(
-      reply ||
-      buildLocalBotFallbackReply({
-        userMessage: rawMessage,
-        userName,
-        previousBotReply
-      })
-    );
+
+    let safeReply = sanitizeBotText(instantIntentReply);
+
+    if (!safeReply) {
+      const reply = await fetchHuggingFaceReply({
+        promptText,
+        maxAttempts: isDm ? 1 : 2,
+        maxTotalWaitMs: isDm ? 1300 : 2600,
+        perAttemptTimeoutMs: isDm ? 1000 : 1500
+      });
+
+      safeReply = sanitizeBotText(
+        reply ||
+        buildLocalBotFallbackReply({
+          userMessage: rawMessage,
+          userName,
+          previousBotReply
+        })
+      );
+    }
 
     if (
       safeReply &&
