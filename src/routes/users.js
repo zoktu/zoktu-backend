@@ -84,6 +84,172 @@ const getAuthPayload = (req) => {
 };
 
 const looksLikeObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
+const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const buildSafeSettingsPatch = (incomingSettings, existingSettings) => {
+  const next = {
+    notifications: isPlainObject(existingSettings?.notifications) ? { ...existingSettings.notifications } : {},
+    privacy: isPlainObject(existingSettings?.privacy) ? { ...existingSettings.privacy } : {},
+    appearance: isPlainObject(existingSettings?.appearance) ? { ...existingSettings.appearance } : {}
+  };
+
+  if (!isPlainObject(incomingSettings)) {
+    if (typeof existingSettings?.language === 'string') next.language = existingSettings.language;
+    return next;
+  }
+
+  if (isPlainObject(incomingSettings.notifications)) {
+    const source = incomingSettings.notifications;
+    const boolKeys = ['messages', 'mentions', 'groupInvites', 'systemUpdates', 'soundEnabled', 'vibrationEnabled'];
+    for (const key of boolKeys) {
+      if (Object.prototype.hasOwnProperty.call(source, key) && typeof source[key] === 'boolean') {
+        next.notifications[key] = source[key];
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(source, 'alertVolume')) {
+      const volume = Number(source.alertVolume);
+      if (Number.isFinite(volume)) {
+        next.notifications.alertVolume = Math.min(100, Math.max(0, Math.round(volume)));
+      }
+    }
+  }
+
+  if (isPlainObject(incomingSettings.privacy)) {
+    const source = incomingSettings.privacy;
+    const boolKeys = ['showOnlineStatus', 'allowDirectMessages', 'showReadReceipts'];
+    for (const key of boolKeys) {
+      if (Object.prototype.hasOwnProperty.call(source, key) && typeof source[key] === 'boolean') {
+        next.privacy[key] = source[key];
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(source, 'profileVisibility')) {
+      const visibility = String(source.profileVisibility || '').trim();
+      if (['public', 'friends', 'private'].includes(visibility)) {
+        next.privacy.profileVisibility = visibility;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(source, 'dmScope')) {
+      const dmScope = String(source.dmScope || '').trim();
+      if (['everyone', 'friends'].includes(dmScope)) {
+        next.privacy.dmScope = dmScope;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(source, 'profilePhotoVisibility')) {
+      const profilePhotoVisibility = String(source.profilePhotoVisibility || '').trim();
+      if (['everyone', 'friends'].includes(profilePhotoVisibility)) {
+        next.privacy.profilePhotoVisibility = profilePhotoVisibility;
+      }
+    }
+  }
+
+  if (isPlainObject(incomingSettings.appearance)) {
+    const source = incomingSettings.appearance;
+    const boolKeys = ['compactMode', 'showAvatars', 'animationsEnabled'];
+    for (const key of boolKeys) {
+      if (Object.prototype.hasOwnProperty.call(source, key) && typeof source[key] === 'boolean') {
+        next.appearance[key] = source[key];
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(source, 'fontSize')) {
+      const fontSize = String(source.fontSize || '').trim();
+      if (['small', 'medium', 'large'].includes(fontSize)) {
+        next.appearance.fontSize = fontSize;
+      }
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(incomingSettings, 'language')) {
+    if (incomingSettings.language === null) {
+      next.language = null;
+    } else if (typeof incomingSettings.language === 'string') {
+      next.language = incomingSettings.language;
+    }
+  } else if (typeof existingSettings?.language === 'string') {
+    next.language = existingSettings.language;
+  }
+
+  return next;
+};
+
+const buildSafeUserPatch = (incomingBody, existingUser) => {
+  const safe = {};
+  if (!isPlainObject(incomingBody)) return safe;
+
+  if (Object.prototype.hasOwnProperty.call(incomingBody, 'displayName')) {
+    if (incomingBody.displayName === null) {
+      safe.displayName = null;
+    } else if (typeof incomingBody.displayName === 'string') {
+      safe.displayName = incomingBody.displayName;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(incomingBody, 'bio')) {
+    if (incomingBody.bio === null) {
+      safe.bio = null;
+    } else if (typeof incomingBody.bio === 'string') {
+      safe.bio = incomingBody.bio;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(incomingBody, 'age')) {
+    if (incomingBody.age === null || incomingBody.age === '') {
+      safe.age = null;
+    } else {
+      const parsedAge = Number(incomingBody.age);
+      if (Number.isFinite(parsedAge)) safe.age = Math.round(parsedAge);
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(incomingBody, 'gender')) {
+    if (incomingBody.gender === null) {
+      safe.gender = null;
+    } else if (typeof incomingBody.gender === 'string') {
+      safe.gender = incomingBody.gender;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(incomingBody, 'dob')) {
+    if (incomingBody.dob === null || incomingBody.dob === '') {
+      safe.dob = null;
+    } else if (typeof incomingBody.dob === 'string' || incomingBody.dob instanceof Date) {
+      safe.dob = incomingBody.dob;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(incomingBody, 'location')) {
+    if (incomingBody.location === null) {
+      safe.location = null;
+    } else if (typeof incomingBody.location === 'string') {
+      safe.location = incomingBody.location;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(incomingBody, 'avatar')) {
+    if (incomingBody.avatar === null) {
+      safe.avatar = null;
+    } else if (typeof incomingBody.avatar === 'string') {
+      safe.avatar = incomingBody.avatar;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(incomingBody, 'photoURL')) {
+    if (incomingBody.photoURL === null) {
+      safe.photoURL = null;
+    } else if (typeof incomingBody.photoURL === 'string') {
+      safe.photoURL = incomingBody.photoURL;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(incomingBody, 'settings')) {
+    safe.settings = buildSafeSettingsPatch(incomingBody.settings, existingUser?.settings || {});
+  }
+
+  return safe;
+};
 
 const getViewerIdsFromReq = async (req) => {
   const payload = getAuthPayload(req);
@@ -209,6 +375,7 @@ router.get('/', asyncHandler(async (req, res) => {
 router.get('/:id', asyncHandler(async (req, res) => {
   const viewerIds = await getViewerIdsFromReq(req);
   const requestedId = String(req.params.id || '').trim();
+  const normalizedRequestedId = requestedId.replace(/^@+/, '');
 
   if (requestedId && env.botId && requestedId === String(env.botId)) {
     const botName = String(env.botName || 'Bot');
@@ -230,13 +397,59 @@ router.get('/:id', asyncHandler(async (req, res) => {
   }
 
   // Remove early return from cache to ensure stats are always freshly calculated
-  const idToResolve = String(req.params.id);
-  const ids = Array.from(await expandUserIdEquivalents(idToResolve));
+  const idToResolve = String(normalizedRequestedId || req.params.id || '').trim();
+  const idsSet = new Set(await expandUserIdEquivalents(idToResolve));
 
   // DB fallback (important for blockedUsers/friends persistence)
   try {
-    const doc = await User.findOne({ $or: [{ _id: idToResolve }, { guestId: idToResolve }, { username: idToResolve }, { email: idToResolve }] }).lean().exec().catch(() => null);
+    let doc = null;
+
+    if (!doc && looksLikeObjectId(idToResolve)) {
+      doc = await User.findById(idToResolve).lean().exec().catch(() => null);
+    }
+    if (!doc) {
+      doc = await User.findOne({ guestId: idToResolve }).lean().exec().catch(() => null);
+    }
+    if (!doc) {
+      doc = await User.findOne({ email: idToResolve }).lean().exec().catch(() => null);
+    }
+    if (!doc) {
+      doc = await User.findOne({ username: idToResolve }).lean().exec().catch(() => null);
+    }
+    if (!doc) {
+      doc = await User.findOne({ displayName: idToResolve }).lean().exec().catch(() => null);
+    }
+    if (!doc) {
+      doc = await User.findOne({ name: idToResolve }).lean().exec().catch(() => null);
+    }
+
+    if (!doc && idToResolve) {
+      const usernameRegex = new RegExp(`^${escapeRegex(idToResolve)}$`, 'i');
+      const caseInsensitiveMatches = await User.find({
+        $or: [{ username: usernameRegex }, { displayName: usernameRegex }, { name: usernameRegex }]
+      })
+        .sort({ _id: -1 })
+        .limit(2)
+        .lean()
+        .exec()
+        .catch(() => []);
+
+      if (caseInsensitiveMatches.length === 1) {
+        doc = caseInsensitiveMatches[0];
+      } else if (caseInsensitiveMatches.length > 1) {
+        return res.status(409).json({
+          message: 'Ambiguous profile identifier. Please open profile using exact case or userId.'
+        });
+      }
+    }
+
     if (doc) {
+      if (doc?._id) idsSet.add(String(doc._id));
+      if (doc?.guestId) idsSet.add(String(doc.guestId));
+      if (doc?.email) idsSet.add(String(doc.email));
+      if (doc?.username) idsSet.add(String(doc.username));
+      const ids = Array.from(idsSet);
+
       const derivedUsername = doc.username || doc.displayName || doc.name || (doc.email ? String(doc.email).split('@')[0] : undefined);
       
       // Calculate real-time stats (using expanded IDs to match any participant identifier)
@@ -439,6 +652,12 @@ router.post('/:id/view', asyncHandler(async (req, res) => {
 // Record chat activity for a user: increments message counts and updates streak/level
 router.post('/:id/activity/message', asyncHandler(async (req, res) => {
   const userId = req.params.id;
+
+  const payload = getAuthPayload(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+  const ok = await authMatchesUserId(payload, userId);
+  if (!ok) return res.status(403).json({ message: 'Forbidden' });
+
   const messages = Number(req.body.count || 1);
   const now = Date.now();
 
@@ -488,6 +707,12 @@ router.post('/:id/activity/message', asyncHandler(async (req, res) => {
 // Update user and persist to MongoDB
 router.patch('/:id', asyncHandler(async (req, res) => {
   const userIdParam = String(req.params.id);
+
+  const payload = getAuthPayload(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+  const ok = await authMatchesUserId(payload, userIdParam);
+  if (!ok) return res.status(403).json({ message: 'Forbidden' });
+
   let existing = users.get(userIdParam) || { id: userIdParam };
 
   // Best-effort DB read so lock survives stale in-memory entries.
@@ -503,22 +728,26 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   const currentName = existing?.name ? String(existing.name).trim() : '';
   const wantsNameChange = typeof incomingName === 'string' && incomingName.length > 0 && incomingName !== currentName;
 
+  const incomingUsernameRaw = req.body?.username;
+  const incomingUsername = typeof incomingUsernameRaw === 'string' ? incomingUsernameRaw.trim() : null;
+  const currentUsername = existing?.username ? String(existing.username).trim() : '';
+  const wantsUsernameChange = typeof incomingUsername === 'string' && incomingUsername.length > 0 && incomingUsername !== currentUsername;
+
   // Username/name is set only during /auth/signup or /auth/guest.
   // Disallow any attempt to change it via Settings/Profile updates.
-  if (wantsNameChange) {
+  if (wantsNameChange || wantsUsernameChange) {
     return res.status(403).json({ message: 'Username cannot be changed from Settings.' });
   }
 
-  // Do not trust client-provided lastUsernameChange.
-  const safeBody = { ...(req.body || {}) };
-  delete safeBody.lastUsernameChange;
+  // Whitelist only profile/settings fields and drop sensitive fields.
+  const safeBody = buildSafeUserPatch(req.body, existing);
 
   // Disallow profane content in profile fields like `bio`, `username`, `displayName`.
   try {
     if (typeof safeBody.bio === 'string' && containsProfanity(safeBody.bio, { lenient: true })) {
       return res.status(400).json({ message: 'Profile bio contains disallowed content' });
     }
-    if (typeof safeBody.username === 'string' && containsProfanity(safeBody.username, { lenient: true })) {
+    if (typeof incomingUsername === 'string' && incomingUsername && containsProfanity(incomingUsername, { lenient: true })) {
       return res.status(400).json({ message: 'Username contains disallowed content' });
     }
     if (typeof safeBody.displayName === 'string' && containsProfanity(safeBody.displayName, { lenient: true })) {

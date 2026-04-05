@@ -26,6 +26,8 @@ const MESSAGE_WINDOW_MS = 15000; // 15s window
 const MESSAGE_LIMIT = 8; // more than this in window => mute
 const MUTE_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_WORDS = 300; // maximum words allowed per message
+const NORMAL_MESSAGE_CHAR_LIMIT = 200;
+const VIP_MESSAGE_CHAR_LIMIT = 500;
 const ROOM_MESSAGE_RETENTION_LIMIT = 50;
 
 const BOT_ID = env.botId || 'bot-baka';
@@ -312,6 +314,47 @@ const getAuthPayload = (req) => {
 };
 
 const looksLikeObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
+
+const isVipUserRecord = (userDoc) => {
+  if (!userDoc || typeof userDoc !== 'object') return false;
+  const userType = String(userDoc.userType || '').toLowerCase();
+  const premiumStatus = String(userDoc.premiumStatus || userDoc.subscription?.plan || '').toLowerCase();
+  const premiumUntilTs = userDoc.premiumUntil ? new Date(userDoc.premiumUntil).getTime() : 0;
+  const hasValidPremiumUntil = Number.isFinite(premiumUntilTs) && premiumUntilTs > Date.now();
+
+  return Boolean(
+    userDoc.isPremium === true ||
+    userType === 'premium' ||
+    premiumStatus === 'premium' ||
+    premiumStatus === 'monthly' ||
+    premiumStatus === 'yearly' ||
+    hasValidPremiumUntil
+  );
+};
+
+const getMessageCharLimitForIdentifiers = async (identifiers = []) => {
+  const normalized = Array.from(new Set((identifiers || []).map((v) => String(v || '').trim()).filter(Boolean)));
+  if (!normalized.length) return NORMAL_MESSAGE_CHAR_LIMIT;
+
+  const objectIds = normalized.filter((id) => looksLikeObjectId(id));
+  const emails = normalized.filter((id) => id.includes('@'));
+  const guestIds = normalized.filter((id) => !id.includes('@') && !looksLikeObjectId(id));
+
+  const ors = [
+    ...(objectIds.length ? [{ _id: { $in: objectIds } }] : []),
+    ...(guestIds.length ? [{ guestId: { $in: guestIds } }] : []),
+    ...(emails.length ? [{ email: { $in: emails } }] : [])
+  ];
+
+  if (!ors.length) return NORMAL_MESSAGE_CHAR_LIMIT;
+
+  const userDoc = await User.findOne({ $or: ors })
+    .select('isPremium userType premiumStatus premiumUntil subscription')
+    .lean()
+    .catch(() => null);
+
+  return isVipUserRecord(userDoc) ? VIP_MESSAGE_CHAR_LIMIT : NORMAL_MESSAGE_CHAR_LIMIT;
+};
 
 const pruneRoomMessages = async ({ roomDoc, roomId, Model }) => {
   try {
@@ -870,6 +913,12 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   // Prevent spoofing senderId; if provided senderId isn't one of your equivalent ids, fall back to canonical id.
   const senderIdEffective = (senderId && auth.ids.includes(String(senderId))) ? String(senderId) : String(auth.primary);
 
+  const messageCharLimit = await getMessageCharLimitForIdentifiers([senderIdEffective, ...(auth.ids || [])]);
+  const messageText = String(content || '');
+  if (messageText.length > messageCharLimit) {
+    return res.status(400).json({ message: `Message too long (max ${messageCharLimit} characters)` });
+  }
+
   // word limit check
   const words = (content || '').trim().split(/\s+/).filter(Boolean).length;
   if (words > MAX_WORDS) {
@@ -1171,8 +1220,9 @@ router.post('/messages/:id/pin', asyncHandler(async (req, res) => {
   const auth = await getAuthIdentity(req);
   if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
 
-  const { doc } = await findMessageDocById(id);
+  const { doc, Model } = await findMessageDocById(id);
   if (!doc) return res.status(404).json({ message: 'Message not found' });
+  if (!Model) return res.status(500).json({ message: 'Message store unavailable' });
 
   // Check room owner/admin privileges
   const roomDoc = await getRoomDocById(String(doc.roomId), 'owner admins type');
@@ -1187,12 +1237,35 @@ router.post('/messages/:id/pin', asyncHandler(async (req, res) => {
 
   if (!isModerator) return res.status(403).json({ message: 'Forbidden' });
 
-  const meta = doc.meta || {};
-  meta.pinned = true;
-  meta.pinnedBy = meta.pinnedBy || String(auth.primaryName || auth.primary || '');
-  meta.pinnedAt = new Date().toISOString();
+  const actorName = String(
+    auth?.payload?.displayName ||
+    auth?.payload?.name ||
+    auth?.payload?.username ||
+    auth?.primary ||
+    ''
+  );
+  const pinnedBy = String((doc.meta && doc.meta.pinnedBy) || actorName || auth.primary || '');
+  const pinnedAt = new Date().toISOString();
+
+  // Use atomic update to avoid mixed-object change detection edge cases.
+  await Model.updateOne(
+    { _id: doc._id },
+    {
+      $set: {
+        'meta.pinned': true,
+        'meta.pinnedBy': pinnedBy,
+        'meta.pinnedAt': pinnedAt
+      }
+    }
+  ).exec();
+
+  const meta = {
+    ...(doc.meta || {}),
+    pinned: true,
+    pinnedBy,
+    pinnedAt
+  };
   doc.meta = meta;
-  await doc.save();
 
   // Best-effort: update in-memory cache
   try {
@@ -1213,8 +1286,9 @@ router.post('/messages/:id/unpin', asyncHandler(async (req, res) => {
   const auth = await getAuthIdentity(req);
   if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
 
-  const { doc } = await findMessageDocById(id);
+  const { doc, Model } = await findMessageDocById(id);
   if (!doc) return res.status(404).json({ message: 'Message not found' });
+  if (!Model) return res.status(500).json({ message: 'Message store unavailable' });
 
   // Check room owner/admin privileges
   const roomDoc = await getRoomDocById(String(doc.roomId), 'owner admins type');
@@ -1229,12 +1303,23 @@ router.post('/messages/:id/unpin', asyncHandler(async (req, res) => {
 
   if (!isModerator) return res.status(403).json({ message: 'Forbidden' });
 
-  const meta = doc.meta || {};
+  // Use atomic update to guarantee pinned flags are removed from persistence.
+  await Model.updateOne(
+    { _id: doc._id },
+    {
+      $unset: {
+        'meta.pinned': 1,
+        'meta.pinnedBy': 1,
+        'meta.pinnedAt': 1
+      }
+    }
+  ).exec();
+
+  const meta = { ...(doc.meta || {}) };
   delete meta.pinned;
   delete meta.pinnedBy;
   delete meta.pinnedAt;
   doc.meta = meta;
-  await doc.save();
 
   // Best-effort: update in-memory cache
   try {

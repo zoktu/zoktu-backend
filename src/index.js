@@ -149,7 +149,41 @@ const MESSAGE_WINDOW_MS = 15000; // 15s window
 const MESSAGE_LIMIT = 8; // more than this in window => mute
 const MUTE_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_WORDS = 300; // maximum words allowed per message
+const NORMAL_MESSAGE_CHAR_LIMIT = 200;
+const VIP_MESSAGE_CHAR_LIMIT = 500;
 const ROOM_MESSAGE_RETENTION_LIMIT = 50;
+
+const isVipUserRecord = (userDoc) => {
+  if (!userDoc || typeof userDoc !== 'object') return false;
+  const userType = String(userDoc.userType || '').toLowerCase();
+  const premiumStatus = String(userDoc.premiumStatus || userDoc.subscription?.plan || '').toLowerCase();
+  const premiumUntilTs = userDoc.premiumUntil ? new Date(userDoc.premiumUntil).getTime() : 0;
+  const hasValidPremiumUntil = Number.isFinite(premiumUntilTs) && premiumUntilTs > Date.now();
+
+  return Boolean(
+    userDoc.isPremium === true ||
+    userType === 'premium' ||
+    premiumStatus === 'premium' ||
+    premiumStatus === 'monthly' ||
+    premiumStatus === 'yearly' ||
+    hasValidPremiumUntil
+  );
+};
+
+const getMessageCharLimitForSender = async (senderId) => {
+  const id = String(senderId || '').trim();
+  if (!id) return NORMAL_MESSAGE_CHAR_LIMIT;
+
+  const ors = [{ guestId: id }, { email: id }];
+  if (/^[a-f\d]{24}$/i.test(id)) ors.unshift({ _id: id });
+
+  const userDoc = await User.findOne({ $or: ors })
+    .select('isPremium userType premiumStatus premiumUntil subscription')
+    .lean()
+    .catch(() => null);
+
+  return isVipUserRecord(userDoc) ? VIP_MESSAGE_CHAR_LIMIT : NORMAL_MESSAGE_CHAR_LIMIT;
+};
 
 const updateRoomDocById = async (id, update) => {
   if (!id) return null;
@@ -436,14 +470,23 @@ io.on('connection', (socket) => {
   });
 
   // Room messaging: accept { roomId, senderId, senderName, content }
-  socket.on('room:message', (payload) => {
+  socket.on('room:message', async (payload) => {
     try {
       const { roomId, senderId, senderName, content } = payload || {};
       if (!roomId || !content) return;
+      const contentText = String(content || '');
+      const senderIdEffective = effectiveUserId ? String(effectiveUserId) : (senderId ? String(senderId) : null);
+      if (!senderIdEffective) return;
+
+      const messageCharLimit = await getMessageCharLimitForSender(senderIdEffective);
+      if (contentText.length > messageCharLimit) {
+        socket.emit('message:error', { message: `Message too long (max ${messageCharLimit} characters)` });
+        return;
+      }
 
       // Allow only zoktu.com links; block other external links.
       try {
-        if (containsBlockedExternalLink(content)) {
+        if (containsBlockedExternalLink(contentText)) {
           socket.emit('message:error', { message: 'Message removed: external links are not allowed (only zoktu.com allowed)' });
           return;
         }
@@ -452,20 +495,20 @@ io.on('connection', (socket) => {
       }
 
       // word limit
-      const words = (content || '').trim().split(/\s+/).filter(Boolean).length;
+      const words = contentText.trim().split(/\s+/).filter(Boolean).length;
       if (words > MAX_WORDS) {
         socket.emit('message:error', { message: `Message too long (max ${MAX_WORDS} words)` });
         return;
       }
 
       // mute check
-      if (isUserMuted(senderId)) {
-        const until = mutedUsers.get(senderId);
+      if (isUserMuted(senderIdEffective)) {
+        const until = mutedUsers.get(senderIdEffective);
         socket.emit('muted', { mutedUntil: until });
         return;
       }
 
-      const muteStart = registerUserMessage(senderId);
+      const muteStart = registerUserMessage(senderIdEffective);
       if (muteStart) {
         socket.emit('muted', { mutedUntil: muteStart });
         return;
@@ -482,13 +525,13 @@ io.on('connection', (socket) => {
           const isRandom = roomDoc && roomDoc.category === 'random';
           const nameForDb = senderName || '';
           
-          const doc = new Model({ roomId, senderId, senderName: nameForDb, content, type: 'text' });
+          const doc = new Model({ roomId, senderId: senderIdEffective, senderName: nameForDb, content: contentText, type: 'text' });
           await doc.save();
           
           const msg = { 
             id: doc._id.toString(), 
             roomId, 
-            senderId, 
+            senderId: senderIdEffective, 
             senderName: isRandom ? 'Stranger' : (doc.senderName || senderId || 'User'), 
             content: doc.content, 
             timestamp: doc.createdAt.toISOString() 
@@ -510,9 +553,9 @@ io.on('connection', (socket) => {
           const fallbackMsg = { 
             id: `msg-${Date.now()}-${Math.floor(Math.random()*1000)}`, 
             roomId, 
-            senderId, 
+            senderId: senderIdEffective, 
             senderName: isRandom ? 'Stranger' : (senderName || 'User'), 
-            content, 
+            content: contentText, 
             timestamp: new Date().toISOString() 
           };
           io.to(roomId).emit('room:message', fallbackMsg);

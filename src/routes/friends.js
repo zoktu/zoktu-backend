@@ -88,6 +88,23 @@ const canonicalFriendKeyForUserDoc = (doc, fallbackId) => {
   return fallbackId ? String(fallbackId) : null;
 };
 
+const mapFriendRequestDoc = (doc) => {
+  const fromUserId = String(doc?.fromUserId || '');
+  const toUserId = String(doc?.toUserId || '');
+  return {
+    id: String(doc?._id || ''),
+    senderId: fromUserId,
+    fromUserId,
+    receiverId: toUserId,
+    toUserId,
+    status: String(doc?.status || 'pending'),
+    message: doc?.message,
+    createdAt: doc?.createdAt || null,
+    isSeen: Boolean(doc?.isSeen),
+    seenAt: doc?.seenAt || null
+  };
+};
+
 // List pending friend requests for the authenticated user
 router.get('/requests', requireAuth, asyncHandler(async (req, res) => {
   const payload = req.user;
@@ -95,20 +112,19 @@ router.get('/requests', requireAuth, asyncHandler(async (req, res) => {
   const canonical = (await canonicalIdForAuthPayload(payload)) || expanded[0] || null;
   const allowIds = uniqStrings([canonical, ...(expanded || [])]);
 
+  const unseenOnly = req.query?.unseen === 'true' || req.query?.unseen === '1';
+
   const toIds = allowIds;
-  const docs = await FriendRequest.find({ toUserId: { $in: toIds }, status: 'pending' })
+  const docs = await FriendRequest.find({
+    toUserId: { $in: toIds },
+    status: 'pending',
+    ...(unseenOnly ? { isSeen: { $ne: true } } : {})
+  })
     .sort({ createdAt: -1 })
     .lean()
     .exec();
 
-  res.json((docs || []).map((d) => ({
-    id: String(d._id),
-    fromUserId: String(d.fromUserId),
-    toUserId: String(d.toUserId),
-    status: d.status,
-    message: d.message,
-    createdAt: d.createdAt
-  })));
+  res.json((docs || []).map(mapFriendRequestDoc));
 }));
 
 // Send a friend request (payload sender is taken from auth; accepts multiple body key names)
@@ -143,12 +159,19 @@ router.post('/requests', requireAuth, asyncHandler(async (req, res) => {
   // Idempotent: one pending request per pair
   const existing = await FriendRequest.findOne({ fromUserId: String(fromId), toUserId: String(toId), status: 'pending' }).lean().catch(() => null);
   if (existing?._id) {
-    return res.json({ id: String(existing._id), message: 'request already pending' });
+    return res.json({ ...mapFriendRequestDoc(existing), message: 'request already pending' });
   }
 
-  const doc = new FriendRequest({ fromUserId: String(fromId), toUserId: String(toId), status: 'pending', ...(message ? { message } : {}) });
+  const doc = new FriendRequest({
+    fromUserId: String(fromId),
+    toUserId: String(toId),
+    status: 'pending',
+    isSeen: false,
+    seenAt: null,
+    ...(message ? { message } : {})
+  });
   await doc.save();
-  res.json({ id: String(doc._id), fromUserId: doc.fromUserId, toUserId: doc.toUserId, status: doc.status });
+  res.json(mapFriendRequestDoc(doc));
 }));
 
 const acceptRequest = async (req, res) => {
@@ -170,7 +193,7 @@ const acceptRequest = async (req, res) => {
   if (!fr) return res.status(404).json({ message: 'Request not found' });
   if (!allowIds.includes(String(fr.toUserId))) return res.status(403).json({ message: 'Forbidden' });
 
-  await FriendRequest.findByIdAndUpdate(requestId, { $set: { status: 'accepted' } }).catch(() => {});
+  await FriendRequest.findByIdAndUpdate(requestId, { $set: { status: 'accepted', isSeen: true, seenAt: new Date() } }).catch(() => {});
 
   // Add each other as friends (store canonical keys so lookups work across uid/_id/guestId)
   const fromLookupId = String(fr.fromUserId);
@@ -205,7 +228,15 @@ const acceptRequest = async (req, res) => {
     if (updatedTo) upsertUserInMemory({ ...updatedTo, id: String(updatedTo._id) });
   } catch (e) {}
 
-  res.json({ message: 'request accepted', id: requestId, fromUserId: fromKey, toUserId: toKey });
+  res.json({
+    message: 'request accepted',
+    id: requestId,
+    senderId: fromKey,
+    fromUserId: fromKey,
+    receiverId: toKey,
+    toUserId: toKey,
+    status: 'accepted'
+  });
 };
 
 const declineRequest = async (req, res) => {
@@ -220,13 +251,33 @@ const declineRequest = async (req, res) => {
   if (!fr) return res.status(404).json({ message: 'Request not found' });
   if (!allowIds.includes(String(fr.toUserId))) return res.status(403).json({ message: 'Forbidden' });
 
-  await FriendRequest.findByIdAndUpdate(requestId, { $set: { status: 'declined' } }).catch(() => {});
-  res.json({ message: 'request declined', id: requestId });
+  await FriendRequest.findByIdAndUpdate(requestId, { $set: { status: 'declined', isSeen: true, seenAt: new Date() } }).catch(() => {});
+  res.json({ message: 'request declined', id: requestId, status: 'declined' });
 };
 
 router.post('/requests/:id/accept', requireAuth, asyncHandler(acceptRequest));
 router.post('/requests/:id/decline', requireAuth, asyncHandler(declineRequest));
 // Backwards-compat alias
 router.post('/requests/:id/reject', requireAuth, asyncHandler(declineRequest));
+
+router.post('/requests/mark-seen', requireAuth, asyncHandler(async (req, res) => {
+  const payload = req.user;
+  const expanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+  const canonical = (await canonicalIdForAuthPayload(payload)) || expanded[0] || null;
+  const allowIds = uniqStrings([canonical, ...(expanded || [])]);
+  if (allowIds.length === 0) return res.status(401).json({ message: 'Unauthorized' });
+
+  const now = new Date();
+  const result = await FriendRequest.updateMany(
+    { toUserId: { $in: allowIds }, status: 'pending', isSeen: { $ne: true } },
+    { $set: { isSeen: true, seenAt: now } }
+  ).exec();
+
+  res.json({
+    message: 'requests marked seen',
+    updated: result?.modifiedCount ?? result?.nModified ?? 0,
+    seenAt: now
+  });
+}));
 
 export default router;

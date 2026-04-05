@@ -982,6 +982,7 @@ router.get('/me', asyncHandler(async (req, res) => {
   const displayName = user?.displayName || user?.name || payload.email || (payload.id && String(payload.id).startsWith('guest-') ? `Guest-${String(payload.id).split('-').slice(-1)[0]}` : 'User');
   const createdAt = user?.createdAt || (payload?.iat ? new Date(Number(payload.iat) * 1000) : undefined);
   const avatarUrl = (user?.avatar || user?.photoURL || '').toString().trim();
+  const resolvedAge = Number.isFinite(Number(user?.age)) ? Number(user.age) : null;
 
   return res.json({
     id: user?.id || payload.id,
@@ -997,7 +998,9 @@ router.get('/me', asyncHandler(async (req, res) => {
     emailVerified: user?.emailVerified ?? false,
     avatar: avatarUrl || null,
     photoURL: avatarUrl || null,
+    avatarUrl: avatarUrl || null,
     bio: user?.bio || '',
+    age: resolvedAge,
     gender: user?.gender || '',
     location: user?.location || '',
     dob: user?.dob || null,
