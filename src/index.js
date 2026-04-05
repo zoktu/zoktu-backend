@@ -1,4 +1,5 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -47,6 +48,27 @@ const corsOptions = {
   credentials: true
 };
 
+// ✅ Security: Rate Limiting — prevents API abuse and brute-force attacks
+// General limiter: 120 requests/minute per IP for all API routes
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' },
+  skip: (req) => env.nodeEnv !== 'production', // only enforce in production
+});
+
+// Strict limiter: 10 requests/minute for auth endpoints (login, register, password reset)
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many auth attempts, please wait a minute.' },
+  skip: (req) => env.nodeEnv !== 'production',
+});
+
 // Allow stricter CORS in production, but permit known frontend origins.
 app.use(cors(corsOptions));
 app.use(helmet());
@@ -73,7 +95,13 @@ app.get('/', (req, res) => {
   });
 });
 
-app.use('/api', checkGlobalBan, routes);
+// Apply rate limiters — auth routes get strict limits, everything else gets general
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+app.use('/api/auth/forgot-password', authLimiter);
+app.use('/api/auth/reset-password', authLimiter);
+app.use('/api/auth/verify-otp', authLimiter);
+app.use('/api', generalLimiter, checkGlobalBan, routes);
 
 app.use((req, res) => {
   res.status(404).json({ message: 'Not found' });
