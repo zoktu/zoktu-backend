@@ -793,8 +793,16 @@ router.post('/guest', asyncHandler(async (req, res) => {
       const ipMatch = existingGuest.guestInitialIp && existingGuest.guestInitialIp === currentIp;
       const deviceMatch = existingGuest.guestDeviceId && deviceId && existingGuest.guestDeviceId === deviceId;
 
-      if (!ipMatch && !deviceMatch) {
-        return res.status(403).json({ message: 'This guest name is reserved for another device or location.' });
+      // Strict security: if a guestDeviceId is recorded, it MUST match for resumption.
+      // Falling back to ipMatch ONLY if guestDeviceId was not recorded (legacy support).
+      if (existingGuest.guestDeviceId) {
+        if (!deviceMatch) {
+          return res.status(403).json({ message: 'This guest name is reserved for another device.' });
+        }
+      } else {
+        if (!ipMatch) {
+          return res.status(403).json({ message: 'This guest name is reserved for another location.' });
+        }
       }
 
       // Allow "login" to existing guest account
