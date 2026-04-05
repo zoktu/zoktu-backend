@@ -78,10 +78,9 @@ const buildCanonicalDmKey = (participants, canonicalById) => {
   const list = Array.isArray(participants) ? participants.map(String).filter(Boolean) : [];
   if (list.length < 2) return null;
   const canonical = list.map((id) => canonicalById.get(String(id)) || String(id));
-  const uniq = Array.from(new Set(canonical.filter(Boolean)));
-  // If both sides resolve to the same user, treat it as invalid (self-DM)
-  if (uniq.length < 2) return null;
-  return canonical.slice().sort().join('|');
+  const normalized = canonical.filter(Boolean);
+  if (normalized.length < 2) return null;
+  return normalized.slice().sort().join('|');
 };
 
 const isDmRoomDoc = (doc) => Boolean(
@@ -1591,35 +1590,34 @@ router.post('/dm', requireVerifiedForHighRisk, asyncHandler(async (req, res) => 
   const requesterIds = await expandUserIdentifiers({ id: requesterId, email: payload?.email });
   const targetIds = await expandUserIdentifiers({ id: targetId, email: null });
 
-  // Prevent self-DM even if ids are in different forms (guestId vs Mongo _id)
   const requesterSet = new Set(uniqStrings(requesterIds));
   const targetSet = new Set(uniqStrings(targetIds));
-  for (const rid of requesterSet) {
-    if (targetSet.has(rid)) {
-      return res.status(400).json({ message: 'You cannot start a DM with yourself' });
-    }
-  }
+  const isSelfDm = Array.from(requesterSet).some((rid) => targetSet.has(String(rid)));
 
-  // Block enforcement: if either side has blocked the other, do not allow DM creation.
+  // Block enforcement is only meaningful for two different users.
   try {
-    const blocked = await isBlockedEitherWay({ aId: requesterId, aIds: Array.from(requesterSet), bId: targetId, bIds: Array.from(targetSet) });
-    if (blocked) return res.status(403).json({ message: 'Cannot start DM: one of the users has blocked the other' });
+    if (!isSelfDm) {
+      const blocked = await isBlockedEitherWay({ aId: requesterId, aIds: Array.from(requesterSet), bId: targetId, bIds: Array.from(targetSet) });
+      if (blocked) return res.status(403).json({ message: 'Cannot start DM: one of the users has blocked the other' });
+    }
   } catch (e) {
     // best-effort
   }
 
-  // Privacy enforcement: if target only allows friends to DM, require friendship.
+  // Privacy enforcement is only meaningful for two different users.
   try {
-    const targetDoc = await User.findOne({ $or: [{ _id: String(targetId) }, { guestId: String(targetId) }] })
-      .select('settings friends')
-      .lean()
-      .catch(() => null);
-    const dmScope = targetDoc?.settings?.privacy?.dmScope || 'everyone';
-    if (dmScope === 'friends') {
-      const friends = Array.isArray(targetDoc?.friends) ? targetDoc.friends.map(String).filter(Boolean) : [];
-      const ok = Array.from(requesterSet).some((rid) => friends.includes(String(rid)));
-      if (!ok) {
-        return res.status(403).json({ message: 'Only friends can send private messages.' });
+    if (!isSelfDm) {
+      const targetDoc = await User.findOne({ $or: [{ _id: String(targetId) }, { guestId: String(targetId) }] })
+        .select('settings friends')
+        .lean()
+        .catch(() => null);
+      const dmScope = targetDoc?.settings?.privacy?.dmScope || 'everyone';
+      if (dmScope === 'friends') {
+        const friends = Array.isArray(targetDoc?.friends) ? targetDoc.friends.map(String).filter(Boolean) : [];
+        const ok = Array.from(requesterSet).some((rid) => friends.includes(String(rid)));
+        if (!ok) {
+          return res.status(403).json({ message: 'Only friends can send private messages.' });
+        }
       }
     }
   } catch (e) {
@@ -1627,10 +1625,32 @@ router.post('/dm', requireVerifiedForHighRisk, asyncHandler(async (req, res) => 
   }
 
   const comboOr = [];
-  for (const a of requesterSet) {
-    for (const b of targetSet) {
-      comboOr.push({ participants: { $all: [a, b] } });
-      comboOr.push({ members: { $all: [a, b] } });
+  if (isSelfDm) {
+    const selfIds = Array.from(new Set([...Array.from(requesterSet), ...Array.from(targetSet)]));
+
+    // Match canonical self-DM shapes first.
+    for (const sid of selfIds) {
+      comboOr.push({ participants: [sid, sid] });
+      comboOr.push({ members: [sid, sid] });
+      comboOr.push({ participants: [sid] });
+      comboOr.push({ members: [sid] });
+    }
+
+    // Also match legacy mixed-id rooms (e.g. _id + guestId of same user).
+    for (let i = 0; i < selfIds.length; i += 1) {
+      for (let j = i + 1; j < selfIds.length; j += 1) {
+        const a = selfIds[i];
+        const b = selfIds[j];
+        comboOr.push({ participants: { $all: [a, b] } });
+        comboOr.push({ members: { $all: [a, b] } });
+      }
+    }
+  } else {
+    for (const a of requesterSet) {
+      for (const b of targetSet) {
+        comboOr.push({ participants: { $all: [a, b] } });
+        comboOr.push({ members: { $all: [a, b] } });
+      }
     }
   }
 
