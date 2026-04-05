@@ -515,13 +515,13 @@ router.patch('/:id', asyncHandler(async (req, res) => {
 
   // Disallow profane content in profile fields like `bio`, `username`, `displayName`.
   try {
-    if (typeof safeBody.bio === 'string' && containsProfanity(safeBody.bio)) {
+    if (typeof safeBody.bio === 'string' && containsProfanity(safeBody.bio, { lenient: true })) {
       return res.status(400).json({ message: 'Profile bio contains disallowed content' });
     }
-    if (typeof safeBody.username === 'string' && containsProfanity(safeBody.username)) {
+    if (typeof safeBody.username === 'string' && containsProfanity(safeBody.username, { lenient: true })) {
       return res.status(400).json({ message: 'Username contains disallowed content' });
     }
-    if (typeof safeBody.displayName === 'string' && containsProfanity(safeBody.displayName)) {
+    if (typeof safeBody.displayName === 'string' && containsProfanity(safeBody.displayName, { lenient: true })) {
       return res.status(400).json({ message: 'Display name contains disallowed content' });
     }
   } catch (e) {

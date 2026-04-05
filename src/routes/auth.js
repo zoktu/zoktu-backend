@@ -454,7 +454,7 @@ router.post('/signup', asyncHandler(async (req, res) => {
 
   // Block profane/explicit display names
   try {
-    if (containsProfanity(displayName || '')) {
+    if (containsProfanity(displayName || '', { lenient: true })) {
       return res.status(400).json({ message: 'Display name contains disallowed content' });
     }
   } catch (e) {
@@ -750,7 +750,7 @@ router.post('/guest', asyncHandler(async (req, res) => {
 
   // Block profane/explicit usernames
   try {
-    if (containsProfanity(username)) {
+    if (containsProfanity(username, { lenient: true })) {
       return res.status(400).json({ message: 'Username contains disallowed content' });
     }
   } catch (e) {
@@ -808,7 +808,7 @@ router.post('/guest', asyncHandler(async (req, res) => {
       // Allow "login" to existing guest account
       saved = await User.findOneAndUpdate(
         { _id: existingGuest._id },
-        { $set: { lastIp: currentIp, isOnline: true, lastSeen: null } },
+        { $set: { lastIp: currentIp, isOnline: true, lastSeen: null, gender: ga.gender, age: ga.age, avatar: existingGuest.avatar || defaultAvatar } },
         { new: true }
       ).lean().exec();
     } else {
@@ -818,6 +818,10 @@ router.post('/guest', asyncHandler(async (req, res) => {
         guestId,
         displayName: username,
         userType: 'guest',
+        gender: ga.gender,
+        age: ga.age,
+        avatar: defaultAvatar,
+        photoURL: defaultAvatar,
         createdAt: now,
         guestInitialIp: currentIp, // Store the IP of the creator
         guestDeviceId: deviceId,    // Store the device ID of the creator
@@ -916,7 +920,7 @@ router.get('/check-username', (req, res) => {
 
   // Block profane/explicit usernames from availability checks
   try {
-    if (containsProfanity(username)) {
+    if (containsProfanity(username, { lenient: true })) {
       return res.status(400).json({ message: 'Username contains disallowed content', available: false });
     }
   } catch (e) {
