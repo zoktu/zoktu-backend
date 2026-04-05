@@ -53,6 +53,8 @@ const UserSchema = new mongoose.Schema({
   following: [{ type: String }],
   blockedUsers: [{ type: String }],
   lastIp: String,
+  guestInitialIp: String,
+  guestDeviceId: String,
   lastActive: Date,
   // Presence
   isOnline: { type: Boolean, default: false },

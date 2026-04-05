@@ -443,8 +443,9 @@ router.post('/signup', asyncHandler(async (req, res) => {
   let convertingGuest = null;
   console.log('   signup auth result:', auth.error ? { error: auth.error.message } : { payload: auth.payload });
   if (!auth.error && auth.payload && auth.payload.userType === 'guest') {
-    const candidate = findUserByIdentifier(auth.payload.id) || users.get(auth.payload.id);
-    if (candidate && candidate.userType === 'guest') {
+    const lookupId = auth.payload.id || auth.payload.id;
+    const candidate = findUserByIdentifier(lookupId) || users.get(lookupId);
+    if (candidate && (candidate.userType === 'guest' || candidate.isAnonymous)) {
       convertingGuest = candidate;
     }
   }
@@ -498,31 +499,38 @@ router.post('/signup', asyncHandler(async (req, res) => {
       if (guestLookupId) {
         saved = await User.findOneAndUpdate(
           { guestId: guestLookupId },
-          { $set: { ...persistableGuest, guestId: guestLookupId } },
+          { $set: { ...persistableGuest, guestId: guestLookupId, userType: 'registered' } }, // explicitly ensure type
           { upsert: true, new: true }
         ).lean().exec();
       } else if (convertingGuest._id) {
         saved = await User.findByIdAndUpdate(
           convertingGuest._id,
-          { $set: persistableGuest },
+          { $set: { ...persistableGuest, userType: 'registered' } },
           { new: true }
         ).lean().exec();
       } else {
         saved = await persistUserToDb(convertingGuest);
       }
 
+      // Cleanup old guest entry from maps before re-inserting
+      if (guestLookupId) users.delete(guestLookupId);
+
       const merged = saved ? upsertUserInMemory({ ...saved, id: String(saved.guestId || saved._id) }) : convertingGuest;
+      
+      // Strict cleanup of guest namespaces
       if (merged?.displayName) guestUsernames.delete(String(merged.displayName).toLowerCase());
+      if (convertingGuest.displayName) guestUsernames.delete(String(convertingGuest.displayName).toLowerCase());
+
       if (merged?.email) users.set(merged.email, merged);
       if (merged?.id) users.set(String(merged.id), merged);
       if (merged?.guestId) users.set(String(merged.guestId), merged);
+      
       const sessionId = await createSessionForUser((merged || convertingGuest).id, req);
       if (!sessionId) {
         return res.status(500).json({ message: 'Unable to create session' });
       }
       const token = signToken((merged || convertingGuest), sessionId);
 
-      // Fire-and-forget verification email
       issueEmailVerification({ email: normalizedEmail, displayName: convertingGuest.displayName || convertingGuest.name || normalizedEmail }).catch(() => {});
       return res.json({ user: sanitizeUser(merged || convertingGuest), token, sessionId });
     } catch (e) {
@@ -532,12 +540,17 @@ router.post('/signup', asyncHandler(async (req, res) => {
   }
 
   // Regular signup (no guest conversion)
+  // Check both Email AND DisplayName collision before attempting creation
   const existingByEmail = await User.findOne({ email: normalizedEmail }).select('_id').lean().exec().catch(() => null);
   if (existingByEmail || users.has(normalizedEmail)) {
     return res.status(409).json({ message: 'email already in use' });
   }
 
   const profileName = displayName || normalizedEmail;
+  const existingByName = await User.findOne({ displayName: { $regex: new RegExp(`^${profileName}$`, 'i') } }).select('_id').lean().exec().catch(() => null);
+  if (existingByName || guestUsernames.has(profileName.toLowerCase())) {
+     return res.status(409).json({ message: 'This display name is already taken. Please choose another one.' });
+  }
   const defaultAvatar = resolveDefaultAvatar(ga.gender);
   const user = {
     id: String(users.size + 1),
@@ -769,22 +782,48 @@ router.post('/guest', asyncHandler(async (req, res) => {
     // continue — we'll still attempt the upsert and rely on DB unique constraints for guests
   }
 
-  // Use an atomic findOneAndUpdate with upsert to avoid race conditions
+  // Use an atomic check then update to verify device/IP for existing guests
   try {
+    const currentIp = getRequestIp(req);
+    const deviceId = req.body.deviceId || req.headers['x-device-id'] || null;
     const now = new Date();
-    const saved = await User.findOneAndUpdate(
-      { displayName: username, userType: 'guest' },
-      {
-        $setOnInsert: {
-          guestId: `guest-${Date.now()}`,
-          displayName: username,
-          userType: 'guest',
-          createdAt: now
-        },
-        $set: { lastIp: getRequestIp(req), isOnline: true, lastSeen: null }
-      },
-      { upsert: true, new: true }
-    ).lean().exec();
+
+    // Check if a guest with this name already exists
+    const existingGuest = await User.findOne({ displayName: username, userType: 'guest' }).lean().exec();
+
+    let saved;
+    if (existingGuest) {
+      // Security check: Same device OR Same initial IP
+      const ipMatch = existingGuest.guestInitialIp && existingGuest.guestInitialIp === currentIp;
+      const deviceMatch = existingGuest.guestDeviceId && deviceId && existingGuest.guestDeviceId === deviceId;
+
+      if (!ipMatch && !deviceMatch) {
+        return res.status(403).json({ message: 'This guest name is reserved for another device or location.' });
+      }
+
+      // Allow "login" to existing guest account
+      saved = await User.findOneAndUpdate(
+        { _id: existingGuest._id },
+        { $set: { lastIp: currentIp, isOnline: true, lastSeen: null } },
+        { new: true }
+      ).lean().exec();
+    } else {
+      // Create new guest
+      const guestId = `guest-${Date.now()}`;
+      const newGuest = new User({
+        guestId,
+        displayName: username,
+        userType: 'guest',
+        createdAt: now,
+        guestInitialIp: currentIp, // Store the IP of the creator
+        guestDeviceId: deviceId,    // Store the device ID of the creator
+        lastIp: currentIp,
+        isOnline: true,
+        lastSeen: null
+      });
+      const doc = await newGuest.save();
+      saved = doc.toObject();
+    }
 
     // Build the in-memory user object
     const user = {
@@ -795,18 +834,26 @@ router.post('/guest', asyncHandler(async (req, res) => {
       displayName: saved.displayName,
       name: saved.displayName,
       userType: 'guest',
-      gender: ga.gender,
-      age: ga.age,
-      avatar: defaultAvatar,
-      photoURL: defaultAvatar,
+      gender: ga.gender || saved.gender,
+      age: ga.age || saved.age,
+      avatar: saved.avatar || defaultAvatar,
+      photoURL: saved.photoURL || saved.avatar || defaultAvatar,
       isOnline: true,
       lastSeen: null,
-      createdAt: saved.createdAt
+      createdAt: saved.createdAt,
+      guestInitialIp: saved.guestInitialIp,
+      guestDeviceId: saved.guestDeviceId
     };
 
     // update in-memory maps
-    try { user.lastIp = getRequestIp(req); await persistUserToDb(user); } catch (e) {}
-    guestUsernames.set(username.toLowerCase(), user.id);
+    try { 
+      user.lastIp = currentIp; 
+      // Ensure in-memory user has the new fields
+      const cached = users.get(user.id) || {};
+      users.set(user.id, { ...cached, ...user });
+      guestUsernames.set(username.toLowerCase(), user.id);
+    } catch (e) {}
+    
     upsertUserInMemory(user);
 
     const sessionId = await createSessionForUser(user.id, req);
