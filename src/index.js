@@ -582,18 +582,14 @@ const start = async () => {
     const botId = env.botId || 'bot-baka';
     const botName = env.botName || 'Baka';
     const botAvatar = env.botAvatar || '';
-    const botEnabled = Boolean(env.huggingFaceApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
+    const botEnabled = String(env.botEnabled || '').toLowerCase() !== 'false';
     if (botEnabled) {
       const doc = await User.findOneAndUpdate(
         { guestId: String(botId) },
         {
           $setOnInsert: {
             guestId: String(botId),
-            userType: 'guest',
-            displayName: String(botName),
-            name: String(botName),
-            username: String(botName),
-            ...(botAvatar ? { avatar: String(botAvatar), photoURL: String(botAvatar) } : {})
+            userType: 'guest'
           },
           $set: {
             displayName: String(botName),

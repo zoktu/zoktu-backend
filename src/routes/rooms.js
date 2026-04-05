@@ -17,7 +17,7 @@ const waitingQueue = [];
 const BOT_ID = env.botId || 'bot-baka';
 const BOT_NAME = env.botName || 'Baka';
 const BOT_AVATAR = env.botAvatar || '';
-const BOT_ENABLED = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
+const BOT_ENABLED = String(env.botEnabled || '').toLowerCase() !== 'false';
 const VIP_MEMBERS_ROOM_ID = String(env.vipMembersRoomId || 'room-1775384158848');
 const VIP_MEMBERS_ROOM_NAME = 'vip members 👑';
 const VIP_MEMBERS_ROOM_IDS = new Set([VIP_MEMBERS_ROOM_ID]);
@@ -32,11 +32,7 @@ const ensureBotUser = async () => {
       {
         $setOnInsert: {
           guestId: String(BOT_ID),
-          userType: 'guest',
-          displayName: String(BOT_NAME),
-          name: String(BOT_NAME),
-          username: String(BOT_NAME),
-          ...(BOT_AVATAR ? { avatar: String(BOT_AVATAR), photoURL: String(BOT_AVATAR) } : {})
+          userType: 'guest'
         },
         $set: {
           displayName: String(BOT_NAME),

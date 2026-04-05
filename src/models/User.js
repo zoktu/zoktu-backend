@@ -28,6 +28,7 @@ const UserSchema = new mongoose.Schema({
       systemUpdates: { type: Boolean, default: false },
       soundEnabled: { type: Boolean, default: true },
       vibrationEnabled: { type: Boolean, default: true },
+      webPushEnabled: { type: Boolean, default: true },
       alertVolume: { type: Number, default: 80 }
     },
     privacy: {

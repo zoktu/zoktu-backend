@@ -4,6 +4,13 @@ import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
+import {
+  getWebPushPublicKey,
+  isWebPushConfigured,
+  normalizePushSubscription,
+  removePushSubscription,
+  upsertPushSubscription
+} from '../lib/webPush.js';
 
 const router = Router();
 
@@ -73,6 +80,64 @@ const getAuthIdentity = async (req) => {
 
   return { payload, ids: Array.from(ids), primary };
 };
+
+router.get('/push/public-key', asyncHandler(async (req, res) => {
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const enabled = isWebPushConfigured();
+  return res.json({
+    enabled,
+    publicKey: enabled ? getWebPushPublicKey() : null
+  });
+}));
+
+router.post('/push/subscribe', asyncHandler(async (req, res) => {
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  if (!isWebPushConfigured()) {
+    return res.status(503).json({ message: 'Push notifications are not configured on the server.' });
+  }
+
+  const subscription = normalizePushSubscription(req.body?.subscription);
+  if (!subscription) {
+    return res.status(400).json({ message: 'Valid push subscription is required.' });
+  }
+
+  const saved = await upsertPushSubscription({
+    userId: String(auth.primary),
+    userAliases: auth.ids,
+    subscription,
+    userAgent: req.body?.userAgent || req.headers['user-agent'] || '',
+    deviceId: req.body?.deviceId || ''
+  });
+
+  return res.json({
+    message: 'subscribed',
+    endpoint: saved?.subscription?.endpoint || subscription.endpoint
+  });
+}));
+
+router.post('/push/unsubscribe', asyncHandler(async (req, res) => {
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const endpoint = String(req.body?.endpoint || req.body?.subscription?.endpoint || '').trim();
+  const deviceId = String(req.body?.deviceId || '').trim();
+  if (!endpoint && !deviceId) {
+    return res.status(400).json({ message: 'endpoint or deviceId is required' });
+  }
+
+  const removed = await removePushSubscription({
+    endpoint,
+    deviceId,
+    userId: String(auth.primary),
+    userAliases: auth.ids
+  });
+
+  return res.json({ message: 'unsubscribed', removed });
+}));
 
 router.get('/', asyncHandler(async (req, res) => {
   const auth = await getAuthIdentity(req);

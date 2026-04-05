@@ -101,7 +101,7 @@ const buildSafeSettingsPatch = (incomingSettings, existingSettings) => {
 
   if (isPlainObject(incomingSettings.notifications)) {
     const source = incomingSettings.notifications;
-    const boolKeys = ['messages', 'mentions', 'groupInvites', 'systemUpdates', 'soundEnabled', 'vibrationEnabled'];
+    const boolKeys = ['messages', 'mentions', 'groupInvites', 'systemUpdates', 'soundEnabled', 'vibrationEnabled', 'webPushEnabled'];
     for (const key of boolKeys) {
       if (Object.prototype.hasOwnProperty.call(source, key) && typeof source[key] === 'boolean') {
         next.notifications[key] = source[key];

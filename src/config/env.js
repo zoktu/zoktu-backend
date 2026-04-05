@@ -30,11 +30,15 @@ export const env = {
   apiOrigin: process.env.API_ORIGIN || process.env.BACKEND_ORIGIN || '',
   huggingFaceApiKey: process.env.HUGGINGFACE_API_KEY || '',
   huggingFaceModel: process.env.HUGGINGFACE_MODEL || 'mistralai/Mistral-7B-Instruct-v0.3',
+  webPushPublicKey: process.env.WEB_PUSH_PUBLIC_KEY || process.env.VAPID_PUBLIC_KEY || '',
+  webPushPrivateKey: process.env.WEB_PUSH_PRIVATE_KEY || process.env.VAPID_PRIVATE_KEY || '',
+  webPushSubject: process.env.WEB_PUSH_SUBJECT || process.env.VAPID_SUBJECT || 'mailto:noreply@zoktu.com',
   botName: process.env.BOT_NAME || 'Baka',
   botId: process.env.BOT_ID || 'bot-baka',
   botAvatar: process.env.BOT_AVATAR || process.env.BOT_AVATAR_URL || '',
   botEnabled: process.env.BOT_ENABLED || '',
   botReplyCooldownMs: process.env.BOT_REPLY_COOLDOWN_MS || '',
+  botReplyDelayMs: process.env.BOT_REPLY_DELAY_MS || '',
   // IP risk detection provider settings
   ipIntelProvider: process.env.IPINTEL_PROVIDER || '',
   ipIntelKey: process.env.IPINTEL_KEY || '',
@@ -52,6 +56,9 @@ env.MAXMIND_DB_PATH = env.maxmindDbPath;
 env.IPINTEL_STRICTNESS = env.ipIntelStrictness;
 env.IPINTEL_ALLOW_PUBLIC_ACCESS_POINTS = env.ipIntelAllowPublicAccessPoints;
 env.IPINTEL_FRAUD_BLOCK_SCORE = env.ipIntelFraudBlockScore;
+env.vapidPublicKey = env.webPushPublicKey;
+env.vapidPrivateKey = env.webPushPrivateKey;
+env.vapidSubject = env.webPushSubject;
 
 // Redis URL for pub/sub and queues
 env.redisUrl = process.env.REDIS_URL || process.env.REDIS_URI || '';

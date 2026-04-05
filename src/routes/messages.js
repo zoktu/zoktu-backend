@@ -9,6 +9,7 @@ import Room from '../models/Room.js';
 import DMRoom from '../models/DMRoom.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
+import { sendWebPushNotifications } from '../lib/webPush.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
 import { containsProfanity, containsBlockedExternalLink } from '../middleware/profanityFilter.js';
 import { encryptMessageContent, decryptMessageContent } from '../lib/messageCrypto.js';
@@ -36,9 +37,14 @@ const BOT_AVATAR = env.botAvatar || '';
 const BOT_REPLY_COOLDOWN_MS = Number.isFinite(Number(env.botReplyCooldownMs))
   ? Number(env.botReplyCooldownMs)
   : 6000;
-const BOT_ENABLED = Boolean(env.huggingFaceApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
+const BOT_REPLY_DELAY_MS = Number.isFinite(Number(env.botReplyDelayMs))
+  ? Math.max(0, Number(env.botReplyDelayMs))
+  : 120;
+const BOT_ENABLED = String(env.botEnabled || '').toLowerCase() !== 'false';
 const botLastReplyByRoom = new Map();
 const BOT_UNSAFE_PATTERN = /(kill yourself|self-harm|suicide|rape|terrorist|nazi)/i;
+const BOT_STYLE_DIRECTIVE = 'Keep a playful, flirty, slightly romantic, and funny girl vibe, but stay respectful and non-explicit. Always answer the user\'s latest question directly first, then add playful flavor.';
+let botIdentityAliasCache = { expiresAt: 0, ids: [String(BOT_ID)] };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -103,11 +109,7 @@ const ensureBotUser = async () => {
       {
         $setOnInsert: {
           guestId: String(BOT_ID),
-          userType: 'guest',
-          displayName: String(BOT_NAME),
-          name: String(BOT_NAME),
-          username: String(BOT_NAME),
-          ...(BOT_AVATAR ? { avatar: String(BOT_AVATAR), photoURL: String(BOT_AVATAR) } : {})
+          userType: 'guest'
         },
         $set: {
           displayName: String(BOT_NAME),
@@ -136,17 +138,59 @@ const ensureBotUser = async () => {
   }
 };
 
+const getBotIdentityAliases = async () => {
+  const now = Date.now();
+  if (botIdentityAliasCache.expiresAt > now && Array.isArray(botIdentityAliasCache.ids) && botIdentityAliasCache.ids.length) {
+    return botIdentityAliasCache.ids;
+  }
+
+  const aliases = [String(BOT_ID)];
+  try {
+    const botDoc = await User.findOne({ guestId: String(BOT_ID) })
+      .select('_id guestId')
+      .lean()
+      .catch(() => null);
+    if (botDoc?._id) aliases.push(String(botDoc._id));
+    if (botDoc?.guestId) aliases.push(String(botDoc.guestId));
+  } catch (e) {
+    // best-effort
+  }
+
+  const uniqueAliases = Array.from(new Set(aliases.map((v) => String(v || '').trim()).filter(Boolean)));
+  botIdentityAliasCache = {
+    expiresAt: now + 60 * 1000,
+    ids: uniqueAliases.length ? uniqueAliases : [String(BOT_ID)]
+  };
+  return botIdentityAliasCache.ids;
+};
+
 const shouldBotReply = async (roomDoc, senderId, content, msgType, replyTo) => {
   if (!BOT_ENABLED) return false;
   if (!roomDoc) return false;
-  if (isDmRoomDoc(roomDoc)) return false;
-  if (!['public', 'private'].includes(String(roomDoc.type || ''))) return false;
+  const isDm = isDmRoomDoc(roomDoc);
+  if (!isDm && !['public', 'private'].includes(String(roomDoc.type || ''))) return false;
   if (String(senderId || '') === String(BOT_ID)) return false;
   const text = String(content || '').trim();
   if (!text) return false;
   if (String(msgType || 'text') !== 'text') return false;
   const last = botLastReplyByRoom.get(String(roomDoc._id)) || 0;
   if (Date.now() - last < BOT_REPLY_COOLDOWN_MS) return false;
+
+  if (isDm) {
+    const participants = [
+      ...((roomDoc?.participants || []).map(String)),
+      ...((roomDoc?.members || []).map(String))
+    ].filter(Boolean);
+    if (!participants.length) return false;
+
+    const botAliases = await getBotIdentityAliases();
+    const botAliasSet = new Set((botAliases || []).map((v) => String(v || '').trim()).filter(Boolean));
+    const hasBotParticipant = participants.some((pid) => botAliasSet.has(String(pid)));
+    if (!hasBotParticipant) return false;
+
+    return true;
+  }
+
   const mentionTokens = extractMentions(text).map((t) => String(t).toLowerCase());
   const botNameToken = String(BOT_NAME || '').trim().toLowerCase();
   const botIdToken = String(BOT_ID || '').trim().toLowerCase();
@@ -178,45 +222,276 @@ const sanitizeBotText = (text) => {
   return raw.length > 600 ? raw.slice(0, 600).trim() : raw;
 };
 
-const fetchHuggingFaceReply = async ({ promptText }) => {
+const normalizeComparableBotText = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+const pickNonRepeatingReply = (options = [], previousBotReply = '', fallbackText = '') => {
+  const normalizedPrev = normalizeComparableBotText(previousBotReply);
+  const unique = Array.from(
+    new Set(
+      (options || [])
+        .map((item) => sanitizeBotText(item))
+        .filter(Boolean)
+    )
+  );
+
+  const filtered = normalizedPrev
+    ? unique.filter((item) => normalizeComparableBotText(item) !== normalizedPrev)
+    : unique;
+
+  const pool = filtered.length ? filtered : unique;
+  if (pool.length) {
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+
+  return sanitizeBotText(fallbackText) || null;
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+
+const extractTextFromHuggingFacePayload = (payload) => {
+  if (!payload) return null;
+
+  if (typeof payload === 'string') {
+    return sanitizeBotText(payload);
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const extracted = extractTextFromHuggingFacePayload(item);
+      if (extracted) return extracted;
+    }
+    return null;
+  }
+
+  if (typeof payload === 'object') {
+    const directCandidates = [
+      payload.generated_text,
+      payload.text,
+      payload.response,
+      payload.answer,
+      payload.summary_text,
+      payload.translation_text,
+      payload.content
+    ];
+
+    for (const candidate of directCandidates) {
+      const sanitized = sanitizeBotText(candidate);
+      if (sanitized) return sanitized;
+    }
+
+    if (Array.isArray(payload.choices)) {
+      for (const choice of payload.choices) {
+        const choiceText =
+          choice?.message?.content ||
+          choice?.text ||
+          choice?.delta?.content;
+        const sanitized = sanitizeBotText(choiceText);
+        if (sanitized) return sanitized;
+      }
+    }
+
+    if (Array.isArray(payload.generated_text)) {
+      for (const textPart of payload.generated_text) {
+        const sanitized = sanitizeBotText(textPart);
+        if (sanitized) return sanitized;
+      }
+    }
+  }
+
+  return null;
+};
+
+const buildLocalBotFallbackReply = ({ userMessage, userName, previousBotReply }) => {
+  const raw = String(userMessage || '').replace(/\s+/g, ' ').trim();
+  const lower = raw.toLowerCase();
+  const safeUserName = String(userName || '').trim() || 'yaar';
+  const pick = (options, fallbackText) => pickNonRepeatingReply(options, previousBotReply, fallbackText);
+
+  if (!raw) {
+    return pick([
+      'Heyy cutie 👀 bolo, aaj kya gossip hai?',
+      'Hi ji ✨ mood mast hai, tum scene batao.',
+      'Haanji 😄 start karo, main full attention mode mein hoon.'
+    ], 'Heyy cutie 👀 bolo, aaj kya gossip hai?');
+  }
+
+  if (/(what'?s\s*your\s*name|who\s*are\s*you|tum\s*kaun|tera\s*naam|tumhara\s*naam|aapka\s*naam|apka\s*naam|your\s*name)/i.test(lower)) {
+    return pick([
+      `Mera naam ${BOT_NAME} hai 😉 aur tum mujhe Baka bula sakte ho.`,
+      `Main ${BOT_NAME} hoon cutie ✨ tumhara naam bhi stylish hai waise.`,
+      `${BOT_NAME} here 😄 ab bolo, next sawaal kya hai hero?`
+    ], `Mera naam ${BOT_NAME} hai 😉 aur tum mujhe Baka bula sakte ho.`);
+  }
+
+  if (/(nind|neend|sleepy|sleep\s*aa|so\s*ja|sona|thak\s*gaya|thak\s*gayi|tired|sleep\s*mode)/i.test(lower)) {
+    return pick([
+      'Aww sleepy ho? 😴 paani piyo, 10 min phone side rakho, phir mast feel hoga.',
+      'Neend aa rahi hai toh mini nap le lo cutie 😌 warna main lullaby mode on kar du? 🎶',
+      'Sleep signal mil gaya 👀 jaldi so jao, warna kal main daantungi 😄'
+    ], 'Sleep signal mil gaya 👀 jaldi so jao, warna kal main daantungi 😄');
+  }
+
+  const hasRelationshipToken = /(^|\b)(bf|boyfriend|gf|girlfriend)(\b|$)/i.test(lower);
+  const asksAboutBotRelationship = /(tera|tumhara|aapka|apka|your|hai\s*kya|h\s*kya|have\s*you|koi\s*bf|koi\s*gf)/i.test(lower);
+  if (hasRelationshipToken && asksAboutBotRelationship) {
+    return pick([
+      'BF? फिलहाल toh nahi 😄 abhi tumse chat karke mood set hai.',
+      'Secret ye hai ki main filhaal single-vibe pe hoon 😉 tum batao apna scene?',
+      'Abhi koi BF-GF scene nahi, main toh yahin tumhari masti partner hoon ✨'
+    ], 'Abhi koi BF-GF scene nahi, main toh yahin tumhari masti partner hoon ✨');
+  }
+
+  if (/(^|\b)(hi|hello|hey|hii|heyy|namaste|salam)(\b|$)/i.test(lower)) {
+    return pick([
+      `Hey ${safeUserName} 😉 kya haal-chaal, hero?`,
+      `Hello ${safeUserName} ✨ aaj ka vibe kya bolta hai?`,
+      `Hi ${safeUserName} 😄 tum aaye ho, chat interesting ho gayi.`
+    ], `Hey ${safeUserName} 😉 kya haal-chaal, hero?`);
+  }
+
+  if (/(kaise ho|kesa ho|kaisi ho|how are you|kaisa chal raha)/i.test(lower)) {
+    return pick([
+      'Main toh mast hoon 😌 tum batao, meri yaad aa rahi thi kya?',
+      'Bilkul badhiya ✨ tumhara mood check karun ya seedha tease karun? 😄',
+      'Aaj full chill + mischievous mode 😏 tum sunao kya scene hai.'
+    ], 'Main toh mast hoon 😌 tum batao, meri yaad aa rahi thi kya?');
+  }
+
+  if (/(thank you|thanks|thx|shukriya|dhanyavaad|dhanyavad)/i.test(lower)) {
+    return pick([
+      'Aww welcome ji 😄 tum bolo, main sunne ke liye ready hoon.',
+      'Anytime ✨ meri taraf se smile free hai, aur pucho.',
+      'Pleasure! 🙌 next line tumhari, reaction meri.'
+    ], 'Aww welcome ji 😄 tum bolo, main sunne ke liye ready hoon.');
+  }
+
+  if (/(khana|khaya|lunch|dinner|breakfast|meal|bhook|bhukh)/i.test(lower)) {
+    return pick([
+      'Haan ji, virtual maggi date ho gayi 😄 tumne kya khaya cutie?',
+      'Biryani mood on hai 👀 tum treat de rahe ho ya main maan lu? 😏',
+      'Khana zaroori hai boss 🍽️ tumne kha liya ya main daantun?'
+    ], 'Khana zaroori hai boss 🍽️ tumne kha liya ya main daantun?');
+  }
+
+  if (/(love|crush|date|relationship|gf|bf|breakup|patchup)/i.test(lower)) {
+    return pick([
+      'Ohooo 👀 spicy topic! Full kahani sunao na, skip mat karna.',
+      'Achaa ji 😄 dil wale topics pe toh main expert listener hoon.',
+      'Relationship talk? Nice ✨ details do, main mast advice + thoda tease dono dungi.'
+    ], 'Ohooo 👀 spicy topic! Full kahani sunao na, skip mat karna.');
+  }
+
+  if (/\?$/.test(raw) || /(\b)(kya|kyu|kyon|kaise|kab|kaun|where|what|why|how)(\b)/i.test(lower)) {
+    const questionEcho = raw.length > 70 ? `${raw.slice(0, 70).trim()}...` : raw;
+    return pick([
+      `Good question, smartie 👌 "${questionEcho}" pe exact answer dene ke liye thoda context aur do.`,
+      `Sahi pucha tumne 😄 "${questionEcho}" ka best answer 1 line context milte hi dungi.`,
+      `Interesting sawaal ✨ "${questionEcho}" — do line aur bolo, main proper help + masti dono karungi.`,
+      `Nice question 👀 "${questionEcho}" ka scene clear karo, fir dekh kaise solve karti hoon.`
+    ], `Good question, smartie 👌 "${questionEcho}" pe exact answer dene ke liye thoda context aur do.`);
+  }
+
+  const shortEcho = raw.length > 80 ? `${raw.slice(0, 80).trim()}...` : raw;
+  const options = [
+    `Achaaa 😄 "${shortEcho}"... tum toh kaafi interesting nikle.`,
+    'Nice one 😉 aur bolo, main judge nahi karungi... shayad.',
+    'Interesting 👀 continue karo, main popcorn le aati hoon mentally.',
+    'Bilkul, makes sense ✨ ab thoda aur masala daalo story mein.',
+    'Vibe aa rahi hai 😌 tum bolte raho, main sunte-sunte smile kar rahi hoon.',
+    'Got it ✅ point clear hai... ab next twist bhi batao.'
+  ];
+
+  return pick(options, 'Haanji 😄 aur bolo, maza aa raha hai.');
+};
+
+const fetchHuggingFaceReply = async ({
+  promptText,
+  maxAttempts = 3,
+  maxTotalWaitMs = 8000,
+  perAttemptTimeoutMs = 1800
+}) => {
   if (!env.huggingFaceApiKey) return null;
   const modelId = env.huggingFaceModel || 'mistralai/Mistral-7B-Instruct-v0.3';
   const url = `https://api-inference.huggingface.co/models/${encodeURIComponent(modelId)}`;
-  
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${env.huggingFaceApiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        inputs: promptText,
-        parameters: {
-          max_new_tokens: 160,
-          temperature: 0.7,
-          repetition_penalty: 1.1,
-          return_full_text: false
-        }
-      })
-    });
 
-    if (!res.ok) return null;
-    const data = await res.json().catch(() => null);
-    
-    // Hugging Face returns an array or object depending on the model
-    let text = "";
-    if (Array.isArray(data) && data[0]?.generated_text) {
-      text = data[0].generated_text;
-    } else if (data?.generated_text) {
-      text = data.generated_text;
+  const startedAt = Date.now();
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const elapsedBeforeAttempt = Date.now() - startedAt;
+    const remainingBudget = maxTotalWaitMs - elapsedBeforeAttempt;
+    if (remainingBudget <= 0) return null;
+
+    const attemptTimeoutMs = Math.max(350, Math.min(perAttemptTimeoutMs, remainingBudget));
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      try {
+        controller.abort();
+      } catch (e) {
+        // ignore
+      }
+    }, attemptTimeoutMs);
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.huggingFaceApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          inputs: promptText,
+          parameters: {
+            max_new_tokens: 160,
+            temperature: 0.7,
+            repetition_penalty: 1.1,
+            return_full_text: false
+          }
+        }),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      const rawBody = await res.text().catch(() => '');
+      let data = null;
+      try {
+        data = rawBody ? JSON.parse(rawBody) : null;
+      } catch {
+        data = rawBody;
+      }
+
+      const extracted = extractTextFromHuggingFacePayload(data);
+      if (extracted) return extracted;
+
+      const errorText = String(data?.error || data?.message || rawBody || '').toLowerCase();
+      const estimatedTime = Number(data?.estimated_time || 0);
+      const retryable =
+        res.status === 429 ||
+        res.status === 503 ||
+        res.status >= 500 ||
+        errorText.includes('loading') ||
+        errorText.includes('estimated_time') ||
+        errorText.includes('try again') ||
+        errorText.includes('currently unavailable');
+
+      if (!retryable || attempt === maxAttempts) {
+        return null;
+      }
+
+      const waitMs = Math.min(4000, Math.max(250, Number.isFinite(estimatedTime) && estimatedTime > 0 ? estimatedTime * 1000 : 500 * attempt));
+      const remainingAfterAttempt = maxTotalWaitMs - (Date.now() - startedAt);
+      if (remainingAfterAttempt <= 120) return null;
+      await sleep(Math.min(waitMs, Math.max(80, remainingAfterAttempt - 80)));
+    } catch (e) {
+      clearTimeout(timeoutId);
+      const isAbort = String(e?.name || '').toLowerCase() === 'aborterror';
+      if (attempt === maxAttempts) return null;
+      const remainingAfterAttempt = maxTotalWaitMs - (Date.now() - startedAt);
+      if (remainingAfterAttempt <= 120) return null;
+      const waitMs = isAbort ? 80 : (240 * attempt);
+      await sleep(Math.min(waitMs, Math.max(50, remainingAfterAttempt - 80)));
     }
-
-    if (!text) return null;
-    return sanitizeBotText(text);
-  } catch (e) {
-    return null;
   }
+
+  return null;
 };
 
 const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
@@ -224,6 +499,24 @@ const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
     await ensureBotUser();
     const rawMessage = String(userMessage || '').trim();
     if (BOT_UNSAFE_PATTERN.test(rawMessage)) return;
+    const Model = getModelForRoom(roomDoc);
+    const isDm = isDmRoomDoc(roomDoc);
+
+    let previousBotReply = '';
+    try {
+      const lastBotDoc = await Model.findOne({
+        roomId: String(roomId),
+        senderId: String(BOT_ID)
+      })
+        .sort({ createdAt: -1 })
+        .select('content')
+        .lean()
+        .exec();
+      previousBotReply = decryptMessageContent(lastBotDoc?.content || '');
+    } catch (e) {
+      previousBotReply = '';
+    }
+
     try {
       await updateRoomDocById(
         String(roomId),
@@ -233,17 +526,51 @@ const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
     } catch (e) {}
 
     const promptText = [
-      `You are ${BOT_NAME}, a friendly female chat bot in a room chat.`,
-      'Reply in Hinglish or English, keep it short (1-2 lines), friendly, and safe.',
+      `You are ${BOT_NAME}, a friendly female chat bot in ${isDmRoomDoc(roomDoc) ? 'a direct message chat' : 'a room chat'}.`,
+      BOT_STYLE_DIRECTIVE,
+      'Reply in Hinglish or English, keep it short (1-2 lines), witty, playful, and emotionally warm.',
+      'Match the user\'s language style (Hindi/Hinglish/English) and keep it natural.',
+      'First sentence must directly answer or acknowledge the user\'s exact latest question/topic.',
+      'Use light teasing/flirty energy only; keep it PG-13 and never explicit sexual.',
+      'Avoid repeating the exact same wording as your previous reply.',
       'Do not mention that you are an AI model or any policies.',
+      previousBotReply ? `Your previous reply: ${String(previousBotReply).slice(0, 220)}` : '',
       `User (${userName || 'User'}): ${rawMessage}`
-    ].join(' ');
+    ].filter(Boolean).join(' ');
 
-    const reply = await fetchHuggingFaceReply({ promptText });
-    const safeReply = reply || "I'm having trouble responding right now. Try again in a moment.";
+    const reply = await fetchHuggingFaceReply({
+      promptText,
+      maxAttempts: isDm ? 1 : 2,
+      maxTotalWaitMs: isDm ? 1300 : 2600,
+      perAttemptTimeoutMs: isDm ? 1000 : 1500
+    });
+    let safeReply = sanitizeBotText(
+      reply ||
+      buildLocalBotFallbackReply({
+        userMessage: rawMessage,
+        userName,
+        previousBotReply
+      })
+    );
+
+    if (
+      safeReply &&
+      previousBotReply &&
+      normalizeComparableBotText(safeReply) === normalizeComparableBotText(previousBotReply)
+    ) {
+      const replacement = buildLocalBotFallbackReply({
+        userMessage: rawMessage,
+        userName,
+        previousBotReply: safeReply
+      });
+      const replacementSafe = sanitizeBotText(replacement);
+      if (replacementSafe && normalizeComparableBotText(replacementSafe) !== normalizeComparableBotText(safeReply)) {
+        safeReply = replacementSafe;
+      }
+    }
+
     if (!safeReply) return;
 
-    const Model = getModelForRoom(roomDoc);
     const doc = new Model({
       roomId,
       senderId: String(BOT_ID),
@@ -487,6 +814,11 @@ const createNotificationsForMessage = async ({ roomDoc, doc, senderIdEffective, 
 
     if (writes.length) {
       await Notification.insertMany(writes);
+
+      // Fire-and-forget: push delivery should not block message send path.
+      sendWebPushNotifications({ notifications: writes }).catch(() => {
+        // best-effort
+      });
     }
   } catch (e) {
     // best-effort
@@ -1151,7 +1483,7 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
         userMessage: String(content || '').trim(),
         userName: req.body?.senderName || ''
       });
-    }, 800);
+    }, BOT_REPLY_DELAY_MS);
   }
   res.json({
     id: doc._id.toString(),
