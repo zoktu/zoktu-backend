@@ -19,6 +19,8 @@ import { containsBlockedExternalLink } from './middleware/profanityFilter.js';
 import { upsertUserInMemory, updateUserPresenceInMemory } from './lib/userStore.js';
 
 const app = express();
+// Trust the first proxy (Render) so rate limiting uses correct client IP instead of Render's proxy IP
+app.set('trust proxy', 1);
 
 const buildAllowedOrigins = () => {
   const raw = String(env.clientOrigin || '').trim();
