@@ -28,4 +28,12 @@ RoomSchema.pre('save', function (next) {
   next();
 });
 
+// Query-performance indexes for room list + membership lookups.
+RoomSchema.index({ type: 1, category: 1, updatedAt: -1 });
+RoomSchema.index({ owner: 1, updatedAt: -1 });
+RoomSchema.index({ createdBy: 1, updatedAt: -1 });
+RoomSchema.index({ members: 1, updatedAt: -1 });
+RoomSchema.index({ participants: 1, updatedAt: -1 });
+RoomSchema.index({ createdAt: -1 });
+
 export default mongoose.models.Room || mongoose.model('Room', RoomSchema);

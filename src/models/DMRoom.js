@@ -28,4 +28,12 @@ DMRoomSchema.pre('save', function (next) {
   next();
 });
 
+// Query-performance indexes for DM room lookup and listing.
+DMRoomSchema.index({ type: 1, category: 1, updatedAt: -1 });
+DMRoomSchema.index({ owner: 1, updatedAt: -1 });
+DMRoomSchema.index({ createdBy: 1, updatedAt: -1 });
+DMRoomSchema.index({ members: 1, updatedAt: -1 });
+DMRoomSchema.index({ participants: 1, updatedAt: -1 });
+DMRoomSchema.index({ createdAt: -1 });
+
 export default mongoose.models.DMRoom || mongoose.model('DMRoom', DMRoomSchema, 'dm_rooms');

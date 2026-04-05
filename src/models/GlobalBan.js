@@ -9,6 +9,9 @@ const GlobalBanSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+GlobalBanSchema.index({ userId: 1, expiresAt: 1 });
+GlobalBanSchema.index({ ip: 1, expiresAt: 1 });
+
 // Compound index for unique ban pairs if needed, or just individual indexes.
 // We allow multiple bans per IP/User for logging history, but the middleware 
 // will check for any active ban.

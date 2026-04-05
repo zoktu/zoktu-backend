@@ -11,8 +11,25 @@ try {
 
 export async function connectDb() {
   try {
+    const toNum = (v, fallback) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? n : fallback;
+    };
+
+    const dbMaxPoolSize = toNum(env.dbMaxPoolSize, 40);
+    const dbMinPoolSize = toNum(env.dbMinPoolSize, 5);
+    const dbServerSelectionTimeoutMs = toNum(env.dbServerSelectionTimeoutMs, 10000);
+    const dbSocketTimeoutMs = toNum(env.dbSocketTimeoutMs, 45000);
+    const dbAutoIndex = String(env.dbAutoIndex || '').trim().toLowerCase();
+
     await mongoose.connect(env.mongoUri, {
-      autoIndex: true
+      autoIndex: dbAutoIndex
+        ? ['1', 'true', 'yes', 'on'].includes(dbAutoIndex)
+        : env.nodeEnv !== 'production',
+      maxPoolSize: dbMaxPoolSize,
+      minPoolSize: dbMinPoolSize,
+      serverSelectionTimeoutMS: dbServerSelectionTimeoutMs,
+      socketTimeoutMS: dbSocketTimeoutMs
     });
     console.log('✅ MongoDB connected');
     try {

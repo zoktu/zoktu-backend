@@ -18,6 +18,11 @@ export const env = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: process.env.PORT || 4000,
   mongoUri: buildMongoUri(),
+  dbMaxPoolSize: process.env.DB_MAX_POOL_SIZE || '40',
+  dbMinPoolSize: process.env.DB_MIN_POOL_SIZE || '5',
+  dbServerSelectionTimeoutMs: process.env.DB_SERVER_SELECTION_TIMEOUT_MS || '10000',
+  dbSocketTimeoutMs: process.env.DB_SOCKET_TIMEOUT_MS || '45000',
+  dbAutoIndex: process.env.DB_AUTO_INDEX || '',
   jwtSecret: process.env.JWT_SECRET || 'change-me',
   messageEncryptionKey: process.env.MESSAGE_ENCRYPTION_KEY || '',
   clientOrigin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
@@ -75,6 +80,9 @@ if (!process.env.SMTP_ENABLED) {
 // Cloudflare Turnstile keys (set in your .env)
 env.turnstileSecret = process.env.TURNSTILE_SECRET || '';
 env.turnstileSiteKey = process.env.TURNSTILE_SITE_KEY || '';
+
+// Slow API monitoring threshold in ms (logs requests slower than this)
+env.slowApiThresholdMs = process.env.SLOW_API_THRESHOLD_MS || '300';
 
 // Cashfree payment gateway configuration
 env.cashfreeAppId = process.env.CASHFREE_APP_ID || '';

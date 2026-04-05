@@ -4,6 +4,7 @@ import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import Room from '../models/Room.js';
 import DMRoom from '../models/DMRoom.js';
+import RoomJoinRequest from '../models/RoomJoinRequest.js';
 import { users, upsertUserInMemory } from '../lib/userStore.js';
 import User from '../models/User.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
@@ -17,6 +18,9 @@ const BOT_ID = env.botId || 'bot-baka';
 const BOT_NAME = env.botName || 'Baka';
 const BOT_AVATAR = env.botAvatar || '';
 const BOT_ENABLED = Boolean(env.geminiApiKey) && (String(env.botEnabled || '').toLowerCase() !== 'false');
+const VIP_MEMBERS_ROOM_ID = String(env.vipMembersRoomId || 'room-1775384158848');
+const VIP_MEMBERS_ROOM_NAME = 'vip members 👑';
+const VIP_MEMBERS_ROOM_IDS = new Set([VIP_MEMBERS_ROOM_ID]);
 
 const ensureBotUser = async () => {
   if (!BOT_ENABLED) return null;
@@ -87,6 +91,97 @@ const isDmRoomDoc = (doc) => Boolean(
     (doc.type === 'private' && doc.category === 'dm')
   )
 );
+
+const isPrivateNonDmRoom = (doc) => Boolean(
+  doc && String(doc.type || '') === 'private' && String(doc.category || '') !== 'dm'
+);
+
+const isVipMembersRoom = (roomOrId) => {
+  const roomId = String((typeof roomOrId === 'object' ? roomOrId?.id || roomOrId?._id : roomOrId) || '').trim();
+  if (roomId && VIP_MEMBERS_ROOM_IDS.has(roomId)) return true;
+  const roomName = String((typeof roomOrId === 'object' ? roomOrId?.name : '') || '').trim().toLowerCase();
+  return roomName === VIP_MEMBERS_ROOM_NAME;
+};
+
+const isPremiumUserRecord = (userDoc) => {
+  if (!userDoc || typeof userDoc !== 'object') return false;
+  const userType = String(userDoc.userType || '').toLowerCase();
+  const premiumStatus = String(userDoc.premiumStatus || userDoc.subscription?.plan || '').toLowerCase();
+  const premiumUntilTs = userDoc.premiumUntil ? new Date(userDoc.premiumUntil).getTime() : 0;
+  const hasValidPremiumUntil = Number.isFinite(premiumUntilTs) && premiumUntilTs > Date.now();
+
+  return Boolean(
+    userDoc.isPremium === true ||
+    userType === 'premium' ||
+    premiumStatus === 'premium' ||
+    premiumStatus === 'monthly' ||
+    premiumStatus === 'yearly' ||
+    hasValidPremiumUntil
+  );
+};
+
+const withDescriptionFallback = (room) => {
+  if (!room || typeof room !== 'object') return room;
+
+  const type = String(room.type || '').toLowerCase();
+  const category = String(room.category || '').toLowerCase();
+  const isDm = type === 'dm' || category === 'dm' || (type === 'private' && category === 'dm');
+  if (isDm) return room;
+
+  const description = typeof room.description === 'string' ? room.description.trim() : '';
+  if (description) return room;
+
+  const settingsDescription = typeof room.settings?.groupDescription === 'string'
+    ? room.settings.groupDescription.trim()
+    : '';
+  if (!settingsDescription) return room;
+
+  return { ...room, description: settingsDescription };
+};
+
+const getUserRecordForAnyIdentifier = async (id) => {
+  if (!id) return null;
+  const raw = String(id);
+  const ors = [{ guestId: raw }, { email: raw }];
+  if (/^[0-9a-fA-F]{24}$/.test(raw)) ors.unshift({ _id: raw });
+  try {
+    return await User.findOne({ $or: ors })
+      .select('_id guestId email userType isPremium premiumStatus premiumUntil subscription')
+      .lean()
+      .exec();
+  } catch (e) {
+    return null;
+  }
+};
+
+const parseAuthPayloadFromRequest = (req) => {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return null;
+  try {
+    return jwt.verify(token, env.jwtSecret);
+  } catch (e) {
+    return null;
+  }
+};
+
+const toIsoDate = (value) => {
+  if (!value) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+};
+
+const mapJoinRequestDoc = (doc) => ({
+  id: String(doc?._id || ''),
+  roomId: String(doc?.roomId || ''),
+  fromUserId: String(doc?.fromUserId || ''),
+  status: String(doc?.status || 'pending'),
+  message: String(doc?.message || ''),
+  reviewedBy: doc?.reviewedBy ? String(doc.reviewedBy) : null,
+  reviewedAt: toIsoDate(doc?.reviewedAt),
+  createdAt: toIsoDate(doc?.createdAt),
+  updatedAt: toIsoDate(doc?.updatedAt)
+});
 
 const findRoomDocById = async (id) => {
   if (!id) return { doc: null, model: null };
@@ -219,9 +314,23 @@ const isBlockedEitherWay = async ({ aId, aIds, bId, bIds }) => {
 router.get('/', asyncHandler(async (req, res) => {
   // prefer DB-backed list but fall back to in-memory
   try {
-    const { type, member } = req.query || {};
+    const { type, member, discover } = req.query || {};
+    const roomType = type ? String(type) : null;
+    const discoverPrivateRooms = roomType === 'private' && ['1', 'true', 'yes'].includes(String(discover || '').toLowerCase());
+    const includeDmRooms = !discoverPrivateRooms;
+
     const and = [];
-    if (type) and.push({ type: String(type) });
+    if (roomType) and.push({ type: roomType });
+    if (discoverPrivateRooms) {
+      // Show only non-DM private groups in discover mode.
+      and.push({
+        $or: [
+          { category: { $exists: false } },
+          { category: null },
+          { category: { $ne: 'dm' } }
+        ]
+      });
+    }
     if (member) {
       const m = String(member);
 
@@ -254,7 +363,7 @@ router.get('/', asyncHandler(async (req, res) => {
     ];
     const [roomDocs, dmRoomDocs] = await Promise.all([
       Room.aggregate(pipeline).allowDiskUse(true).exec(),
-      DMRoom.aggregate(pipeline).allowDiskUse(true).exec()
+      includeDmRooms ? DMRoom.aggregate(pipeline).allowDiskUse(true).exec() : Promise.resolve([])
     ]);
     const docs = [...(roomDocs || []), ...(dmRoomDocs || [])];
 
@@ -304,16 +413,20 @@ router.get('/', asyncHandler(async (req, res) => {
       filtered.push(d);
     }
 
-    const mapped = filtered.map(d => ({ id: d._id, ...d }));
+    const mapped = filtered
+      .map(d => ({ id: d._id, ...d }))
+      .map(withDescriptionFallback);
     res.json(mapped);
     return;
   } catch (e) {
     // in-memory fallback with the same filters
-    const { type, member } = req.query || {};
+    const { type, member, discover } = req.query || {};
     const t = type ? String(type) : null;
+    const discoverPrivateRooms = t === 'private' && ['1', 'true', 'yes'].includes(String(discover || '').toLowerCase());
     const m = member ? String(member) : null;
     const filtered = Array.from(rooms.values()).filter((r) => {
       if (t && String(r.type) !== t) return false;
+      if (discoverPrivateRooms && String(r.category || '') === 'dm') return false;
       if (m) {
         // hide rooms removed by this user
         try {
@@ -344,7 +457,7 @@ router.get('/', asyncHandler(async (req, res) => {
       deduped.push(r);
     }
 
-    res.json(deduped);
+    res.json((deduped || []).map(withDescriptionFallback));
   }
 }));
 
@@ -472,6 +585,32 @@ router.post('/', asyncHandler(async (req, res) => {
     members,
     admins
   };
+
+  const normalizedSettings = {
+    ...(room.settings || {})
+  };
+  if (String(room.type || '') === 'private' && String(room.category || '') !== 'dm') {
+    normalizedSettings.requireApproval = true;
+  }
+
+  // Keep top-level description and settings.groupDescription aligned for group rooms.
+  const isDmRoom = String(room.type || '') === 'dm' || String(room.category || '') === 'dm';
+  if (!isDmRoom) {
+    const hasDescription = typeof room.description === 'string' && room.description.length > 0;
+    const hasGroupDescription = typeof normalizedSettings.groupDescription === 'string' && normalizedSettings.groupDescription.length > 0;
+
+    if (hasDescription && !hasGroupDescription) {
+      normalizedSettings.groupDescription = String(room.description);
+    } else if (!hasDescription && hasGroupDescription) {
+      room.description = String(normalizedSettings.groupDescription);
+    } else if (hasDescription && hasGroupDescription) {
+      // Prefer top-level description at creation time as canonical input.
+      normalizedSettings.groupDescription = String(room.description);
+    }
+  }
+
+  room.settings = normalizedSettings;
+
   // persist to DB
   try {
     const doc = new Room({ _id: id, name: room.name || '', description: room.description || '', type: room.type || 'public', owner: ownerId, createdBy: ownerId, participants: room.participants, members: room.members || room.participants, admins: room.admins || [], settings: room.settings || {}, category: room.category || '' });
@@ -484,16 +623,314 @@ router.post('/', asyncHandler(async (req, res) => {
   res.json(room);
 }));
 
+// List current user's private room join requests
+router.get('/join-requests/mine', asyncHandler(async (req, res) => {
+  const payload = parseAuthPayloadFromRequest(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+
+  const canonical = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
+  const expanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+  const fromIds = uniqStrings([canonical, ...(expanded || [])]);
+  if (!fromIds.length) return res.status(401).json({ message: 'Unauthorized' });
+
+  const rawStatus = String(req.query?.status || '').trim().toLowerCase();
+  const status = ['pending', 'approved', 'rejected'].includes(rawStatus) ? rawStatus : null;
+
+  const query = {
+    fromUserId: { $in: fromIds },
+    ...(status ? { status } : {})
+  };
+
+  const docs = await RoomJoinRequest.find(query)
+    .sort({ createdAt: -1 })
+    .lean()
+    .exec();
+
+  const rank = { pending: 3, approved: 2, rejected: 1 };
+  const byRoom = new Map();
+  for (const d of docs || []) {
+    const roomId = String(d?.roomId || '').trim();
+    if (!roomId) continue;
+
+    const prev = byRoom.get(roomId);
+    if (!prev) {
+      byRoom.set(roomId, d);
+      continue;
+    }
+
+    const prevRank = rank[String(prev?.status || '')] || 0;
+    const nextRank = rank[String(d?.status || '')] || 0;
+    if (nextRank > prevRank) {
+      byRoom.set(roomId, d);
+      continue;
+    }
+
+    const prevCreated = new Date(prev?.createdAt || 0).getTime();
+    const nextCreated = new Date(d?.createdAt || 0).getTime();
+    if (nextRank === prevRank && nextCreated > prevCreated) {
+      byRoom.set(roomId, d);
+    }
+  }
+
+  res.json(Array.from(byRoom.values()).map(mapJoinRequestDoc));
+}));
+
+// Create a join request for a private (non-DM) room
+router.post('/:id/join-request', asyncHandler(async (req, res) => {
+  const payload = parseAuthPayloadFromRequest(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+
+  const id = String(req.params.id || '').trim();
+  if (!id) return res.status(400).json({ message: 'Invalid room id' });
+
+  const found = await findRoomDocById(id);
+  const roomDoc = found?.doc;
+  const roomMem = rooms.get(id) || null;
+  const room = roomDoc || roomMem;
+  if (!room) return res.status(404).json({ message: 'Room not found' });
+  if (isVipMembersRoom(room) || isVipMembersRoom(id)) {
+    return res.status(403).json({ message: 'VIP room does not support join requests. VIP users are auto-added.' });
+  }
+  if (!isPrivateNonDmRoom(room)) {
+    return res.status(400).json({ message: 'Join requests are only supported for private group rooms' });
+  }
+
+  const requesterCanonical = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
+  const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+  const requesterIds = uniqStrings([requesterCanonical, ...(requesterExpanded || [])]);
+  if (!requesterIds.length) return res.status(401).json({ message: 'Unauthorized' });
+
+  const memberSet = new Set([
+    ...((room.members || [])),
+    ...((room.participants || [])),
+    room.owner,
+    room.createdBy
+  ].map((v) => String(v || '').trim()).filter(Boolean));
+
+  const alreadyMember = requesterIds.some((rid) => memberSet.has(String(rid)));
+  if (alreadyMember) {
+    return res.json({ message: 'You are already a member of this room', status: 'member' });
+  }
+
+  // Keep only one pending request per room per user (idempotent)
+  const existingPending = await RoomJoinRequest.findOne({
+    roomId: id,
+    fromUserId: { $in: requesterIds },
+    status: 'pending'
+  }).lean().exec();
+  if (existingPending) {
+    return res.json({
+      message: 'Join request already pending',
+      request: mapJoinRequestDoc(existingPending)
+    });
+  }
+
+  const message = String(req.body?.message || '').trim().slice(0, 200);
+  const doc = new RoomJoinRequest({
+    roomId: id,
+    fromUserId: String(requesterCanonical || requesterIds[0]),
+    status: 'pending',
+    ...(message ? { message } : {})
+  });
+  await doc.save();
+
+  const io = req.app.get('io');
+  if (io) {
+    try {
+      io.to(id).emit('room:join-request:new', { roomId: id, requestId: String(doc._id) });
+    } catch (e) {}
+  }
+
+  res.json({
+    message: 'Join request sent',
+    request: mapJoinRequestDoc(doc)
+  });
+}));
+
+// Owner/admin: list join requests for a private room
+router.get('/:id/join-requests', asyncHandler(async (req, res) => {
+  const payload = parseAuthPayloadFromRequest(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+
+  const id = String(req.params.id || '').trim();
+  if (!id) return res.status(400).json({ message: 'Invalid room id' });
+
+  const found = await findRoomDocById(id);
+  const roomDoc = found?.doc;
+  const room = roomDoc || rooms.get(id) || null;
+  if (!room) return res.status(404).json({ message: 'Room not found' });
+  if (!isPrivateNonDmRoom(room)) {
+    return res.status(400).json({ message: 'Join requests are only supported for private group rooms' });
+  }
+
+  const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+  const requesterCanonical = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
+  const requesterSet = new Set(uniqStrings([requesterCanonical, ...(requesterExpanded || [])]));
+
+  const ownerId = room.owner || room.createdBy;
+  const admins = Array.isArray(room.admins) ? room.admins.map(String) : [];
+  const isOwner = ownerId ? Array.from(requesterSet).some((rid) => String(ownerId) === String(rid)) : false;
+  const isAdmin = admins.length ? Array.from(requesterSet).some((rid) => admins.includes(String(rid))) : false;
+  if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Only owner/admin can review join requests' });
+
+  const rawStatus = String(req.query?.status || '').trim().toLowerCase();
+  const status = ['pending', 'approved', 'rejected'].includes(rawStatus) ? rawStatus : 'pending';
+
+  const docs = await RoomJoinRequest.find({ roomId: id, status })
+    .sort({ createdAt: -1 })
+    .lean()
+    .exec();
+
+  res.json((docs || []).map(mapJoinRequestDoc));
+}));
+
+// Owner/admin: approve a pending join request
+router.post('/:id/join-requests/:requestId/approve', asyncHandler(async (req, res) => {
+  const payload = parseAuthPayloadFromRequest(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+
+  const id = String(req.params.id || '').trim();
+  const requestId = String(req.params.requestId || '').trim();
+  if (!id || !requestId) return res.status(400).json({ message: 'Invalid request' });
+
+  const found = await findRoomDocById(id);
+  const roomDoc = found?.doc;
+  const roomModel = found?.model;
+  const roomMem = rooms.get(id) || null;
+  const room = roomDoc || roomMem;
+  if (!room) return res.status(404).json({ message: 'Room not found' });
+  if (!isPrivateNonDmRoom(room)) {
+    return res.status(400).json({ message: 'Join requests are only supported for private group rooms' });
+  }
+
+  const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+  const requesterCanonical = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
+  const requesterSet = new Set(uniqStrings([requesterCanonical, ...(requesterExpanded || [])]));
+
+  const ownerId = room.owner || room.createdBy;
+  const admins = Array.isArray(room.admins) ? room.admins.map(String) : [];
+  const isOwner = ownerId ? Array.from(requesterSet).some((rid) => String(ownerId) === String(rid)) : false;
+  const isAdmin = admins.length ? Array.from(requesterSet).some((rid) => admins.includes(String(rid))) : false;
+  if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Only owner/admin can approve join requests' });
+
+  const reqDoc = await RoomJoinRequest.findOne({ _id: requestId, roomId: id }).lean().exec();
+  if (!reqDoc) return res.status(404).json({ message: 'Join request not found' });
+  if (String(reqDoc.status) === 'rejected') return res.status(400).json({ message: 'This request was rejected' });
+
+  const candidateUserId = String(reqDoc.fromUserId || '').trim();
+  if (!candidateUserId) return res.status(400).json({ message: 'Invalid requester id' });
+
+  if (roomModel && roomDoc) {
+    await roomModel.findByIdAndUpdate(
+      id,
+      {
+        $addToSet: { participants: candidateUserId, members: candidateUserId },
+        $set: { updatedAt: new Date() }
+      },
+      { upsert: false }
+    ).catch(() => null);
+
+    const fresh = await roomModel.findById(id).lean().catch(() => null);
+    if (fresh) {
+      try { rooms.set(String(fresh._id), { id: String(fresh._id), ...fresh }); } catch (e) {}
+    }
+  } else if (roomMem) {
+    roomMem.participants = Array.from(new Set([...(roomMem.participants || []).map(String), candidateUserId]));
+    roomMem.members = Array.from(new Set([...(roomMem.members || []).map(String), candidateUserId]));
+    roomMem.updatedAt = new Date();
+    rooms.set(id, roomMem);
+  }
+
+  await RoomJoinRequest.findByIdAndUpdate(requestId, {
+    $set: {
+      status: 'approved',
+      reviewedBy: String(requesterCanonical || ''),
+      reviewedAt: new Date(),
+      updatedAt: new Date()
+    }
+  }).catch(() => null);
+
+  const updatedRequest = await RoomJoinRequest.findById(requestId).lean().catch(() => null);
+
+  const io = req.app.get('io');
+  if (io) {
+    try {
+      io.to(id).emit('room:join-request:updated', { roomId: id, requestId, status: 'approved' });
+      const updatedRoom = await (roomModel ? roomModel.findById(id).lean().catch(() => null) : Promise.resolve(rooms.get(id) || null));
+      if (updatedRoom) io.to(id).emit('room:update', { id: updatedRoom._id || id, ...updatedRoom });
+    } catch (e) {}
+  }
+
+  res.json({
+    message: 'Join request approved',
+    request: updatedRequest ? mapJoinRequestDoc(updatedRequest) : null
+  });
+}));
+
+// Owner/admin: reject a pending join request
+router.post('/:id/join-requests/:requestId/reject', asyncHandler(async (req, res) => {
+  const payload = parseAuthPayloadFromRequest(req);
+  if (!payload) return res.status(401).json({ message: 'Unauthorized' });
+
+  const id = String(req.params.id || '').trim();
+  const requestId = String(req.params.requestId || '').trim();
+  if (!id || !requestId) return res.status(400).json({ message: 'Invalid request' });
+
+  const found = await findRoomDocById(id);
+  const roomDoc = found?.doc;
+  const room = roomDoc || rooms.get(id) || null;
+  if (!room) return res.status(404).json({ message: 'Room not found' });
+  if (!isPrivateNonDmRoom(room)) {
+    return res.status(400).json({ message: 'Join requests are only supported for private group rooms' });
+  }
+
+  const requesterExpanded = await expandUserIdentifiers({ id: payload?.id, email: payload?.email });
+  const requesterCanonical = (await canonicalIdForAuthPayload(payload)) || (payload?.id ? String(payload.id) : null);
+  const requesterSet = new Set(uniqStrings([requesterCanonical, ...(requesterExpanded || [])]));
+
+  const ownerId = room.owner || room.createdBy;
+  const admins = Array.isArray(room.admins) ? room.admins.map(String) : [];
+  const isOwner = ownerId ? Array.from(requesterSet).some((rid) => String(ownerId) === String(rid)) : false;
+  const isAdmin = admins.length ? Array.from(requesterSet).some((rid) => admins.includes(String(rid))) : false;
+  if (!isOwner && !isAdmin) return res.status(403).json({ message: 'Only owner/admin can reject join requests' });
+
+  const reqDoc = await RoomJoinRequest.findOne({ _id: requestId, roomId: id }).lean().exec();
+  if (!reqDoc) return res.status(404).json({ message: 'Join request not found' });
+
+  await RoomJoinRequest.findByIdAndUpdate(requestId, {
+    $set: {
+      status: 'rejected',
+      reviewedBy: String(requesterCanonical || ''),
+      reviewedAt: new Date(),
+      updatedAt: new Date()
+    }
+  }).catch(() => null);
+
+  const updatedRequest = await RoomJoinRequest.findById(requestId).lean().catch(() => null);
+
+  const io = req.app.get('io');
+  if (io) {
+    try {
+      io.to(id).emit('room:join-request:updated', { roomId: id, requestId, status: 'rejected' });
+    } catch (e) {}
+  }
+
+  res.json({
+    message: 'Join request rejected',
+    request: updatedRequest ? mapJoinRequestDoc(updatedRequest) : null
+  });
+}));
+
 router.get('/:id', asyncHandler(async (req, res) => {
   const id = req.params.id;
   // try DB first
   try {
     const found = await findRoomDocById(id);
-    if (found?.doc) return res.json({ id: found.doc._id, ...found.doc });
+    if (found?.doc) return res.json(withDescriptionFallback({ id: found.doc._id, ...found.doc }));
   } catch (e) {}
   const room = rooms.get(id);
   if (!room) return res.status(404).json({ message: 'Room not found' });
-  res.json(room);
+  res.json(withDescriptionFallback(room));
 }));
 
 router.post('/:id/join', asyncHandler(async (req, res) => {
@@ -514,6 +951,81 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
   if (!roomDoc && !roomMem) return res.status(404).json({ message: 'Room not found' });
 
   const roomForBot = roomDoc || roomMem;
+  const isVipRoom = isVipMembersRoom(roomForBot) || isVipMembersRoom(id);
+
+  // VIP room policy: only VIP users are allowed, and they can join directly (no request flow).
+  if (isVipRoom) {
+    const joinerRawId = String(userId || '').trim();
+    const joinerCanonicalId = (await canonicalIdForUser(joinerRawId)) || joinerRawId;
+    const joinerDoc =
+      (await getUserRecordForAnyIdentifier(joinerCanonicalId)) ||
+      (joinerCanonicalId !== joinerRawId ? await getUserRecordForAnyIdentifier(joinerRawId) : null);
+
+    if (!isPremiumUserRecord(joinerDoc)) {
+      return res.status(403).json({ message: 'VIP members only. Upgrade to VIP to join this room.' });
+    }
+  }
+
+  // Private (non-DM) rooms require owner/admin approval before join.
+  if (isPrivateNonDmRoom(roomForBot) && !isVipRoom) {
+    const joinerId = String(userId || '').trim();
+    const expandedJoinerIds = await expandUserIdentifiers({ id: joinerId, email: null });
+    const joinerIds = uniqStrings([joinerId, ...(expandedJoinerIds || [])]);
+
+    const roomMembers = new Set([
+      ...((roomForBot.members || []).map(String)),
+      ...((roomForBot.participants || []).map(String)),
+      String(roomForBot.owner || ''),
+      String(roomForBot.createdBy || '')
+    ].filter(Boolean));
+
+    const alreadyMember = joinerIds.some((rid) => roomMembers.has(String(rid)));
+
+    if (!alreadyMember) {
+      const approved = await RoomJoinRequest.findOne({
+        roomId: id,
+        fromUserId: { $in: joinerIds },
+        status: 'approved'
+      }).sort({ reviewedAt: -1, updatedAt: -1, createdAt: -1 }).lean().exec();
+
+      if (!approved) {
+        const existingPending = await RoomJoinRequest.findOne({
+          roomId: id,
+          fromUserId: { $in: joinerIds },
+          status: 'pending'
+        }).sort({ createdAt: -1 }).lean().exec();
+
+        if (existingPending) {
+          return res.status(202).json({
+            message: 'Join request pending approval',
+            requiresApproval: true,
+            request: mapJoinRequestDoc(existingPending)
+          });
+        }
+
+        const newRequest = new RoomJoinRequest({
+          roomId: id,
+          fromUserId: String(joinerIds[0] || joinerId),
+          status: 'pending'
+        });
+        await newRequest.save();
+
+        const io = req.app.get('io');
+        if (io) {
+          try {
+            io.to(id).emit('room:join-request:new', { roomId: id, requestId: String(newRequest._id) });
+          } catch (e) {}
+        }
+
+        return res.status(202).json({
+          message: 'Join request sent. Wait for owner/admin approval.',
+          requiresApproval: true,
+          request: mapJoinRequestDoc(newRequest)
+        });
+      }
+    }
+  }
+
   const shouldAddBot = BOT_ENABLED && roomForBot && !isDmRoomDoc(roomForBot) && ['public', 'private'].includes(String(roomForBot.type || ''));
   if (shouldAddBot) {
     await ensureBotUser();
@@ -1008,6 +1520,30 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     // merge settings if provided
     if (setObj.settings && roomDoc.settings) {
       setObj.settings = { ...(roomDoc.settings || {}), ...(setObj.settings || {}) };
+    }
+
+    // Keep description and settings.groupDescription in sync for non-DM rooms.
+    if (!isDmRoomDoc(roomDoc)) {
+      const hasDescriptionUpdate = Object.prototype.hasOwnProperty.call(setObj, 'description');
+      const hasSettingsUpdate = Object.prototype.hasOwnProperty.call(setObj, 'settings');
+      const hasGroupDescriptionUpdate = Boolean(
+        hasSettingsUpdate &&
+        setObj.settings &&
+        Object.prototype.hasOwnProperty.call(setObj.settings, 'groupDescription')
+      );
+
+      if (hasGroupDescriptionUpdate) {
+        // If settings description changed, reflect it in top-level description used by room cards.
+        setObj.description = String(setObj.settings.groupDescription || '');
+      } else if (hasDescriptionUpdate) {
+        // If top-level description changed directly, mirror it into settings.
+        const syncedDescription = String(setObj.description || '');
+        const baseSettings = hasSettingsUpdate
+          ? { ...(setObj.settings || {}) }
+          : { ...(roomDoc.settings || {}) };
+        baseSettings.groupDescription = syncedDescription;
+        setObj.settings = baseSettings;
+      }
     }
 
     setObj.updatedAt = new Date();

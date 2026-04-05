@@ -26,6 +26,7 @@ const MESSAGE_WINDOW_MS = 15000; // 15s window
 const MESSAGE_LIMIT = 8; // more than this in window => mute
 const MUTE_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_WORDS = 300; // maximum words allowed per message
+const ROOM_MESSAGE_RETENTION_LIMIT = 50;
 
 const BOT_ID = env.botId || 'bot-baka';
 const BOT_NAME = env.botName || 'Baka';
@@ -262,7 +263,7 @@ const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
         attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
         timestamp: doc.createdAt.toISOString()
       });
-      messages.set(roomId, list);
+      messages.set(roomId, list.slice(-ROOM_MESSAGE_RETENTION_LIMIT));
     } catch (e) {}
 
     botLastReplyByRoom.set(String(roomId), Date.now());
@@ -320,7 +321,7 @@ const pruneRoomMessages = async ({ roomDoc, roomId, Model }) => {
 
     const idsToDelete = await Model.find({ roomId: String(roomId) })
       .sort({ createdAt: -1 })
-      .skip(100)
+      .skip(ROOM_MESSAGE_RETENTION_LIMIT)
       .limit(500)
       .select('_id')
       .lean()
@@ -657,7 +658,7 @@ router.get('/rooms/:roomId/messages', (req, res) => {
   // load from DB (most recent first or paginated)
   (async () => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 50, 100);
+      const limit = Math.min(Number(req.query.limit) || ROOM_MESSAGE_RETENTION_LIMIT, ROOM_MESSAGE_RETENTION_LIMIT);
       const before = req.query.before;
       
       const roomDoc = await getRoomDocById(roomId);
@@ -728,7 +729,8 @@ router.get('/rooms/:roomId/messages', (req, res) => {
     } catch (e) {
       // fallback to in-memory cache
       const list = messages.get(roomId) || [];
-      res.json(list.slice(-(Number(req.query.limit) || 50)));
+      const fallbackLimit = Math.min(Number(req.query.limit) || ROOM_MESSAGE_RETENTION_LIMIT, ROOM_MESSAGE_RETENTION_LIMIT);
+      res.json(list.slice(-fallbackLimit));
     }
   })();
 });

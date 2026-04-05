@@ -50,6 +50,11 @@ const corsOptions = {
   credentials: true
 };
 
+const parsePositiveInt = (raw, fallback) => {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
 // ✅ Security: Rate Limiting — prevents API abuse and brute-force attacks
 // General limiter: 120 requests/minute per IP for all API routes
 const generalLimiter = rateLimit({
@@ -76,9 +81,23 @@ app.use(cors(corsOptions));
 app.use(helmet());
 // HTTP response compression (gzip/brotli where supported)
 app.use(compression());
-app.use(morgan('dev'));
+const slowApiThresholdMs = parsePositiveInt(env.slowApiThresholdMs, 300);
+const shouldSkipAccessLog = (req) => req.path === '/api/health' || req.path === '/health' || req.path === '/';
+app.use(morgan(env.nodeEnv === 'production' ? 'tiny' : 'dev', { skip: shouldSkipAccessLog }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// Lightweight slow request monitor for operational visibility.
+app.use((req, res, next) => {
+  const startedAt = process.hrtime.bigint();
+  res.on('finish', () => {
+    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+    if (elapsedMs >= slowApiThresholdMs && req.path !== '/api/health' && req.path !== '/health') {
+      console.warn(`[SLOW_API] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${elapsedMs.toFixed(1)}ms)`);
+    }
+  });
+  next();
+});
  
  // Cache-Control middleware to prevent stale data/UI issues
  app.use((req, res, next) => {
@@ -130,6 +149,7 @@ const MESSAGE_WINDOW_MS = 15000; // 15s window
 const MESSAGE_LIMIT = 8; // more than this in window => mute
 const MUTE_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_WORDS = 300; // maximum words allowed per message
+const ROOM_MESSAGE_RETENTION_LIMIT = 50;
 
 const updateRoomDocById = async (id, update) => {
   if (!id) return null;
@@ -478,7 +498,7 @@ io.on('connection', (socket) => {
           try {
             const list = messages.get(roomId) || [];
             list.push(msg);
-            messages.set(roomId, list.slice(-100)); // limit cache size
+            messages.set(roomId, list.slice(-ROOM_MESSAGE_RETENTION_LIMIT)); // limit cache size
           } catch (e) {}
 
           // broadcast to room
