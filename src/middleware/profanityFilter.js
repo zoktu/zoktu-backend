@@ -19,7 +19,17 @@ const normalizeWord = (w) => {
     .replace(/(.)\1+/gu, '$1');
 };
 
-const PROFANITY_SET = new Set(DEFAULT_PROFANITY.map(s => normalizeWord(s)).filter(Boolean));
+// Guard against degenerate normalization like "xxx" -> "x" causing broad false positives.
+// We only keep normalized profanity tokens that are at least 2 chars long.
+const PROFANITY_SET = new Set(
+  DEFAULT_PROFANITY
+    .map((s) => normalizeWord(s))
+    .filter((s) => Boolean(s) && s.length >= 2)
+);
+
+// Subsequence matching is intentionally limited to longer bad words to avoid
+// random safe words matching short patterns (e.g. 3-letter terms).
+const SUBSEQ_MIN_BAD_LEN = 4;
 
 // Common leet replacements to deobfuscate obvious substitutions
 const LEET_MAP = {
@@ -159,6 +169,7 @@ export const containsProfanity = (text, options = {}) => {
         // skip safe short tokens and extremely short words
         if (!normTok || SAFE_ALLOWLIST.has(normTok) || normTok.length <= 2) continue;
         for (const bad of PROFANITY_SET) {
+          if (bad.length < SUBSEQ_MIN_BAD_LEN) continue;
           if (!bad) continue;
           const ratio = subsequenceMatchRatio(normTok, bad);
           // Tighten normal threshold to reduce false positives
