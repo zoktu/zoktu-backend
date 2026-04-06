@@ -14,6 +14,7 @@ import sessionsRoutes from './sessions.js';
 import notificationsRoutes from './notifications.js';
 import paymentsRoutes from './payments.js';
 import adminRoutes from './admin.js';
+import supportRoutes from './support.js';
 
 const router = Router();
 // ... (rest of the imports)
@@ -32,5 +33,6 @@ router.use('/reports', reportsRoutes);
 router.use('/sessions', sessionsRoutes);
 router.use('/notifications', notificationsRoutes);
 router.use('/payments', paymentsRoutes);
+router.use('/support', supportRoutes);
 
 export default router;
