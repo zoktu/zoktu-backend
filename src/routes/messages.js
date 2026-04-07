@@ -47,6 +47,10 @@ const BOT_STYLE_DIRECTIVE = 'Keep a playful, flirty, slightly romantic, and funn
 let botIdentityAliasCache = { expiresAt: 0, ids: [String(BOT_ID)] };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const AUTH_IDENTITY_CACHE_TTL_MS = 15 * 1000;
+const BLOCKED_SET_CACHE_TTL_MS = 15 * 1000;
+const authIdentityCache = new Map(); // token -> { ts, identity }
+const blockedSetByPrimaryCache = new Map(); // primaryId -> { ts, set }
 
 
 
@@ -675,10 +679,15 @@ const registerUserMessage = (userId) => {
   return null;
 };
 
-const getAuthPayload = (req) => {
+const getAuthToken = (req) => {
+  const header = req?.headers?.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  return token || null;
+};
+
+const getAuthPayload = (req, tokenOverride = null) => {
   try {
-    const header = req.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    const token = tokenOverride || getAuthToken(req);
     if (!token) return null;
     return jwt.verify(token, env.jwtSecret);
   } catch (e) {
@@ -995,7 +1004,7 @@ const getExpandedBlockedSetForAuth = async (auth) => {
 
 // Returns a primary (best) id + a set of equivalent ids that should be treated as "the same user".
 // This fixes mismatches between JWT payload id vs Mongo _id vs guestId.
-const getAuthIdentity = async (req) => {
+const resolveAuthIdentity = async (req) => {
   const payload = getAuthPayload(req);
   if (!payload) return null;
 
@@ -1051,6 +1060,41 @@ const getAuthIdentity = async (req) => {
   return { payload, ids: Array.from(ids), primary };
 };
 
+const getAuthIdentityCached = async (req) => {
+  const token = getAuthToken(req);
+  const now = Date.now();
+
+  if (token) {
+    const cached = authIdentityCache.get(token);
+    if (cached && now - cached.ts <= AUTH_IDENTITY_CACHE_TTL_MS) {
+      return cached.identity;
+    }
+  }
+
+  const identity = await resolveAuthIdentity(req);
+  if (token && identity) {
+    authIdentityCache.set(token, { ts: now, identity });
+  }
+  return identity;
+};
+
+const getExpandedBlockedSetForAuthCached = async (auth) => {
+  const key = String(auth?.primary || '').trim();
+  if (!key) return getExpandedBlockedSetForAuth(auth);
+
+  const now = Date.now();
+  const cached = blockedSetByPrimaryCache.get(key);
+  if (cached && now - cached.ts <= BLOCKED_SET_CACHE_TTL_MS) {
+    return new Set(cached.set);
+  }
+
+  const set = await getExpandedBlockedSetForAuth(auth);
+  blockedSetByPrimaryCache.set(key, { ts: now, set: Array.from(set || []) });
+  return set;
+};
+
+const getAuthIdentity = getAuthIdentityCached;
+
 const findMessageDocById = async (id) => {
   let doc = await RoomMessage.findById(id).catch(() => null);
   if (doc) return { doc, Model: RoomMessage };
@@ -1105,7 +1149,7 @@ router.get('/rooms/:roomId/messages', (req, res) => {
 
       // identify current user (optional) and filter blocked users' messages
       const auth = await getAuthIdentity(req);
-      const blockedSet = auth?.primary ? await getExpandedBlockedSetForAuth(auth) : new Set();
+      const blockedSet = auth?.primary ? await getExpandedBlockedSetForAuthCached(auth) : new Set();
       if (blockedSet.size) {
         docs = (docs || []).filter((d) => !blockedSet.has(String(d.senderId)));
       }
@@ -1471,21 +1515,42 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
 
   const Model = getModelForRoom(roomDoc);
   const safeAttachments = Array.isArray(req.body?.attachments)
-    ? req.body.attachments.map(a => ({
-        url: a?.url,
+    ? req.body.attachments
+      .map(a => ({
+        url: String(a?.url || a?.path || a?.secure_url || '').trim(),
         fileName: a?.fileName,
         fileSize: a?.fileSize,
         mimeType: a?.mimeType,
         publicId: a?.publicId
       }))
+      .filter((a) => Boolean(a.url))
     : [];
+
+  const normalizedType = String(req.body?.type || 'text').toLowerCase();
+  const rawContent = typeof content === 'string' ? content : String(content ?? '');
+  const trimmedContent = rawContent.trim();
+  const mediaFallbackByType = {
+    image: '📷 Image',
+    audio: '🎤 Audio',
+    voice: '🎤 Voice message',
+    video: '🎬 Video',
+    file: '📎 File',
+    media: '📎 Attachment'
+  };
+  const shouldAutofillContent = !trimmedContent && (
+    safeAttachments.length > 0 ||
+    ['image', 'audio', 'voice', 'video', 'media', 'file'].includes(normalizedType)
+  );
+  const contentForStorage = shouldAutofillContent
+    ? (mediaFallbackByType[normalizedType] || '📎 Attachment')
+    : rawContent;
 
   const doc = new Model({
     roomId,
     senderId: senderIdEffective,
     senderName: req.body.senderName || '',
-    content: encryptMessageContent(content),
-    type: req.body.type || 'text',
+    content: encryptMessageContent(contentForStorage),
+    type: normalizedType || 'text',
     replyTo: replyTo ? String(replyTo) : undefined,
     attachments: safeAttachments
   });
@@ -1514,7 +1579,7 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     doc,
     senderIdEffective,
     senderName: req.body?.senderName || '',
-    content,
+    content: contentForStorage,
     replyTo,
     auth
   });

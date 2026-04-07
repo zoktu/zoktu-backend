@@ -141,6 +141,7 @@ app.set('io', io);
 const socketsByUser = new Map(); // userId -> socket
 const socketCountByUser = new Map(); // userId -> count (supports multiple tabs/devices)
 const waitingSockets = [];
+const randomQueueTimeouts = new Map(); // socketId -> timeout handle
 const messages = new Map(); // roomId -> message[]
 // Per-user message rate tracking and mute map (same rules as REST)
 const userMessageWindow = new Map(); // userId -> { count, windowStart }
@@ -152,6 +153,46 @@ const MAX_WORDS = 300; // maximum words allowed per message
 const NORMAL_MESSAGE_CHAR_LIMIT = 200;
 const VIP_MESSAGE_CHAR_LIMIT = 500;
 const ROOM_MESSAGE_RETENTION_LIMIT = 50;
+
+const clearRandomQueueTimeout = (socketId) => {
+  const sid = String(socketId || '').trim();
+  if (!sid) return;
+  const timer = randomQueueTimeouts.get(sid);
+  if (timer) {
+    clearTimeout(timer);
+    randomQueueTimeouts.delete(sid);
+  }
+};
+
+const clearRandomQueueEntry = (socketId) => {
+  const sid = String(socketId || '').trim();
+  if (!sid) return;
+
+  const idx = waitingSockets.findIndex((w) => w?.socket?.id === sid);
+  if (idx !== -1) waitingSockets.splice(idx, 1);
+  clearRandomQueueTimeout(sid);
+};
+
+const scheduleRandomQueueTimeout = (socket, timeoutMs = 25000) => {
+  const sid = String(socket?.id || '').trim();
+  if (!sid) return;
+
+  clearRandomQueueTimeout(sid);
+  const timer = setTimeout(() => {
+    const idx = waitingSockets.findIndex((w) => w?.socket?.id === sid);
+    if (idx !== -1) {
+      waitingSockets.splice(idx, 1);
+      try {
+        socket.emit('random:timeout');
+      } catch (e) {
+        // ignore
+      }
+    }
+    randomQueueTimeouts.delete(sid);
+  }, Math.max(1000, Number(timeoutMs) || 25000));
+
+  randomQueueTimeouts.set(sid, timer);
+};
 
 const isVipUserRecord = (userDoc) => {
   if (!userDoc || typeof userDoc !== 'object') return false;
@@ -278,15 +319,30 @@ io.on('connection', (socket) => {
   const effectiveUserId = userId ? String(userId) : null;
   if (effectiveUserId) {
     // Check if user or IP is globally banned
-    const ip = socket.handshake.address;
+    const ip = String(socket.handshake.address || socket.request?.socket?.remoteAddress || '')
+      .split(',')[0]
+      .trim();
     (async () => {
+      const now = new Date();
       const isBanned = await GlobalBan.findOne({
-        $or: [
-          { userId: effectiveUserId },
-          { ip }
-        ],
-        $or: [{ expiresAt: { $exists: false } }, { expiresAt: null }, { expiresAt: { $gt: new Date() } }]
-      }).lean();
+        $and: [
+          {
+            $or: [
+              { userId: effectiveUserId },
+              ...(ip ? [{ ip }] : [])
+            ]
+          },
+          {
+            $or: [
+              { expiresAt: { $exists: false } },
+              { expiresAt: null },
+              { expiresAt: { $gt: now } }
+            ]
+          }
+        ]
+      })
+        .select('reason')
+        .lean();
 
       if (isBanned) {
         socket.emit('global:kick', { reason: isBanned.reason });
@@ -354,8 +410,7 @@ io.on('connection', (socket) => {
       }
     } catch (e) {}
     // remove from waiting queue if present
-    const idx = waitingSockets.findIndex(w => w.socket.id === socket.id);
-    if (idx !== -1) waitingSockets.splice(idx, 1);
+    clearRandomQueueEntry(socket.id);
 
     // Notify other participants in any rooms this socket was in that partner left
     try {
@@ -370,25 +425,30 @@ io.on('connection', (socket) => {
   // Join random queue
   socket.on('random:join', async (data) => {
     const uid = data?.userId || userId || `guest-${socket.id}`;
+    clearRandomQueueEntry(socket.id);
     
-    // Purge dead sockets from the queue while searching
-    while (waitingSockets.length > 0) {
-      const waiter = waitingSockets.shift();
-      
-      // Basic check: is the waiter still connected?
-      if (!waiter || !waiter.socket || !waiter.socket.connected) {
+    let waiter = null;
+    for (let i = 0; i < waitingSockets.length; i += 1) {
+      const candidate = waitingSockets[i];
+      if (!candidate || !candidate.socket || !candidate.socket.connected) {
+        if (candidate?.socket?.id) {
+          clearRandomQueueEntry(candidate.socket.id);
+        } else {
+          waitingSockets.splice(i, 1);
+        }
+        i -= 1;
         continue;
       }
-      
-      // Basic check: is it NOT me? (Same user id or guest id can't match)
-      if (String(waiter.uid) === String(uid)) {
-        // Technically this shouldn't happen with unique guest ids, 
-        // but if a logged in user opens two tabs, we just add them back to the end
-        // wait, actually we should just skip them for now
-        waitingSockets.push(waiter);
-        break; // Stop looking for now or we might infinite loop if it's just us
-      }
+      if (candidate.socket.id === socket.id) continue;
+      if (String(candidate.uid) === String(uid)) continue;
 
+      waiter = candidate;
+      waitingSockets.splice(i, 1);
+      clearRandomQueueTimeout(candidate.socket.id);
+      break;
+    }
+
+    if (waiter) {
       // We found a valid match!
       // Use a more global-unique ID to prevent collisions
       const randomSuffix = Math.random().toString(36).slice(2, 7);
@@ -428,25 +488,14 @@ io.on('connection', (socket) => {
     }
 
     // No valid match found -> add to waiting list
-    // First, remove any existing entry for this socket if they are re-joining
-    const existingIdx = waitingSockets.findIndex(w => w.socket.id === socket.id);
-    if (existingIdx !== -1) waitingSockets.splice(existingIdx, 1);
-    
     waitingSockets.push({ socket, uid, createdAt: Date.now() });
-    
-    // auto-timeout after 25s (increased slightly)
-    setTimeout(() => {
-      const idx = waitingSockets.findIndex(w => w.socket.id === socket.id);
-      if (idx !== -1) {
-        waitingSockets.splice(idx, 1);
-        socket.emit('random:timeout');
-      }
-    }, 25000);
+
+    // auto-timeout after 25s
+    scheduleRandomQueueTimeout(socket, 25000);
   });
 
   socket.on('random:leave', () => {
-    const idx = waitingSockets.findIndex(w => w.socket.id === socket.id);
-    if (idx !== -1) waitingSockets.splice(idx, 1);
+    clearRandomQueueEntry(socket.id);
   });
 
   // Explicitly end a room (user requested end)
