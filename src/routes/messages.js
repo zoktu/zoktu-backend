@@ -5,14 +5,17 @@ import { upsertUserInMemory } from '../lib/userStore.js';
 import { getModelForRoom, RoomMessage, DMMessage, RandomMessage } from '../models/Message.js';
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env.js';
-import Room from '../models/Room.js';
-import DMRoom from '../models/DMRoom.js';
+import {
+  getRoomDocByIdWithCache as getRoomDocById,
+  updateRoomDocByIdWithCache as updateRoomDocById
+} from '../lib/roomCache.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import { sendWebPushNotifications } from '../lib/webPush.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
 import { containsProfanity, containsBlockedExternalLink } from '../middleware/profanityFilter.js';
 import { encryptMessageContent, decryptMessageContent } from '../lib/messageCrypto.js';
+import { pruneOldMessagesForRoom } from '../lib/messageRetention.js';
 
 const router = Router();
 export const messages = new Map();
@@ -51,58 +54,6 @@ const AUTH_IDENTITY_CACHE_TTL_MS = 15 * 1000;
 const BLOCKED_SET_CACHE_TTL_MS = 15 * 1000;
 const authIdentityCache = new Map(); // token -> { ts, identity }
 const blockedSetByPrimaryCache = new Map(); // primaryId -> { ts, set }
-
-
-
-const roomCache = new Map();
-const ROOM_CACHE_TTL = 30000; // 30 seconds
-
-const getRoomDocById = async (id, select = null) => {
-  if (!id) return null;
-
-  // Only cache if no specific select is requested, or cache hit matches select (simplified: only cache full docs)
-  if (!select) {
-    const cached = roomCache.get(id);
-    if (cached && (Date.now() - cached.ts < ROOM_CACHE_TTL)) {
-      return cached.doc;
-    }
-  }
-
-  const preferDm = String(id).startsWith('dm-');
-  const primary = preferDm ? DMRoom : Room;
-  const secondary = preferDm ? Room : DMRoom;
-
-  let query = primary.findById(id);
-  if (select) query = query.select(select);
-  let doc = await query.lean().catch(() => null);
-  
-  if (!doc) {
-    query = secondary.findById(id);
-    if (select) query = query.select(select);
-    doc = await query.lean().catch(() => null);
-  }
-
-  if (doc && !select) {
-    roomCache.set(id, { doc, ts: Date.now() });
-  }
-  return doc;
-};
-
-const updateRoomDocById = async (id, update, options = {}) => {
-  if (!id) return null;
-  const preferDm = String(id).startsWith('dm-');
-  const primary = preferDm ? DMRoom : Room;
-  const secondary = preferDm ? Room : DMRoom;
-
-  await primary.findByIdAndUpdate(id, update, options).catch(() => null);
-  let doc = await primary.findById(id).lean().catch(() => null);
-  if (doc) return doc;
-
-  await secondary.findByIdAndUpdate(id, update, options).catch(() => null);
-  doc = await secondary.findById(id).lean().catch(() => null);
-  return doc;
-};
-
 const ensureBotUser = async () => {
   if (!BOT_ENABLED) return null;
   try {
@@ -629,6 +580,11 @@ const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
       type: 'text'
     });
     await doc.save();
+    void pruneOldMessagesForRoom({
+      Model,
+      roomId: String(roomId),
+      keepLatest: ROOM_MESSAGE_RETENTION_LIMIT
+    });
 
     try {
       const list = messages.get(roomId) || [];
@@ -736,29 +692,6 @@ const getMessageCharLimitForIdentifiers = async (identifiers = []) => {
     .catch(() => null);
 
   return isVipUserRecord(userDoc) ? VIP_MESSAGE_CHAR_LIMIT : NORMAL_MESSAGE_CHAR_LIMIT;
-};
-
-const pruneRoomMessages = async ({ roomDoc, roomId, Model }) => {
-  try {
-    if (!roomDoc) return;
-    if (isDmRoomDoc(roomDoc)) return;
-    if (String(roomDoc.category || '') === 'random') return;
-
-    const idsToDelete = await Model.find({ roomId: String(roomId) })
-      .sort({ createdAt: -1 })
-      .skip(ROOM_MESSAGE_RETENTION_LIMIT)
-      .limit(500)
-      .select('_id')
-      .lean()
-      .exec();
-
-    const ids = (idsToDelete || []).map((d) => d?._id).filter(Boolean);
-    if (!ids.length) return;
-
-    await Model.deleteMany({ _id: { $in: ids } }).exec();
-  } catch (e) {
-    // best-effort
-  }
 };
 
 const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1573,6 +1506,11 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   } catch (err) {}
 
   await doc.save();
+  void pruneOldMessagesForRoom({
+    Model,
+    roomId: String(roomId),
+    keepLatest: ROOM_MESSAGE_RETENTION_LIMIT
+  });
 
   await createNotificationsForMessage({
     roomDoc,

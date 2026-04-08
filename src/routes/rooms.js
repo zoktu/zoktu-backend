@@ -8,6 +8,7 @@ import RoomJoinRequest from '../models/RoomJoinRequest.js';
 import { users, upsertUserInMemory } from '../lib/userStore.js';
 import User from '../models/User.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
+import { redisDeleteByPrefix, redisGetJson, redisSetJson } from '../lib/redis.js';
 
 const router = Router();
 const rooms = new Map();
@@ -21,6 +22,103 @@ const BOT_ENABLED = String(env.botEnabled || '').toLowerCase() !== 'false';
 const VIP_MEMBERS_ROOM_ID = String(env.vipMembersRoomId || 'room-1775384158848');
 const VIP_MEMBERS_ROOM_NAME = 'vip members 👑';
 const VIP_MEMBERS_ROOM_IDS = new Set([VIP_MEMBERS_ROOM_ID]);
+
+const parsePositiveInt = (value, fallback) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+};
+
+const ROOMS_LIST_CACHE_PREFIX = 'rooms:list:v1:';
+const ROOMS_LIST_CACHE_TTL_SECONDS = parsePositiveInt(env.roomsListCacheTtlSeconds, 5);
+const ROOMS_LIST_CACHE_LOCAL_TTL_MS = ROOMS_LIST_CACHE_TTL_SECONDS * 1000;
+const ROOMS_LIST_CACHE_MAX_ENTRIES = parsePositiveInt(env.roomsListCacheMaxEntries, 800);
+const ROOMS_LIST_CACHE_MAX_PAYLOAD_BYTES = parsePositiveInt(env.redisCacheMaxPayloadBytes, 64 * 1024);
+const ROOMS_LIST_CACHE_CLEANUP_DELETE_LIMIT = parsePositiveInt(env.redisCacheCleanupDeleteLimit, 200);
+const ROOMS_LIST_CACHE_INVALIDATE_DEBOUNCE_MS = 1200;
+
+const roomsListLocalCache = new Map();
+let lastRoomsListCacheInvalidateAt = 0;
+
+const stableObjectString = (value) => {
+  if (value === null || value === undefined) return '';
+  if (typeof value !== 'object') return String(value);
+  if (Array.isArray(value)) return `[${value.map((v) => stableObjectString(v)).join(',')}]`;
+
+  const entries = Object.entries(value)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  return `{${entries.map(([k, v]) => `${k}:${stableObjectString(v)}`).join('|')}}`;
+};
+
+const buildRoomsListCacheKey = (query = {}) => {
+  const compact = {
+    type: query?.type ? String(query.type) : '',
+    member: query?.member ? String(query.member) : '',
+    discover: query?.discover ? String(query.discover) : ''
+  };
+  return `${ROOMS_LIST_CACHE_PREFIX}${stableObjectString(compact)}`;
+};
+
+const setRoomsListLocalCache = (cacheKey, value) => {
+  if (!cacheKey) return;
+
+  if (roomsListLocalCache.size >= ROOMS_LIST_CACHE_MAX_ENTRIES && !roomsListLocalCache.has(cacheKey)) {
+    const overflow = roomsListLocalCache.size - ROOMS_LIST_CACHE_MAX_ENTRIES + 1;
+    if (overflow > 0) {
+      const victims = Array.from(roomsListLocalCache.entries())
+        .sort((a, b) => Number(a[1]?.ts || 0) - Number(b[1]?.ts || 0))
+        .slice(0, overflow)
+        .map(([key]) => key);
+
+      for (const victim of victims) {
+        roomsListLocalCache.delete(victim);
+      }
+    }
+  }
+
+  roomsListLocalCache.set(cacheKey, { ts: Date.now(), value });
+};
+
+const getRoomsListCachedValue = async (cacheKey) => {
+  if (!cacheKey) return null;
+
+  const local = roomsListLocalCache.get(cacheKey);
+  if (local && Date.now() - Number(local.ts || 0) < ROOMS_LIST_CACHE_LOCAL_TTL_MS) {
+    return local.value;
+  }
+
+  if (local) roomsListLocalCache.delete(cacheKey);
+
+  const redisValue = await redisGetJson(cacheKey);
+  if (redisValue) {
+    setRoomsListLocalCache(cacheKey, redisValue);
+    return redisValue;
+  }
+
+  return null;
+};
+
+const setRoomsListCachedValue = async (cacheKey, value) => {
+  if (!cacheKey || !Array.isArray(value)) return;
+  setRoomsListLocalCache(cacheKey, value);
+  void redisSetJson(cacheKey, value, ROOMS_LIST_CACHE_TTL_SECONDS, {
+    cleanupPrefix: ROOMS_LIST_CACHE_PREFIX,
+    cleanupDeleteLimit: ROOMS_LIST_CACHE_CLEANUP_DELETE_LIMIT,
+    maxPayloadBytes: ROOMS_LIST_CACHE_MAX_PAYLOAD_BYTES
+  });
+};
+
+const invalidateRoomsListCaches = async () => {
+  const now = Date.now();
+  if (now - lastRoomsListCacheInvalidateAt < ROOMS_LIST_CACHE_INVALIDATE_DEBOUNCE_MS) {
+    return;
+  }
+
+  lastRoomsListCacheInvalidateAt = now;
+  roomsListLocalCache.clear();
+  await redisDeleteByPrefix(ROOMS_LIST_CACHE_PREFIX, ROOMS_LIST_CACHE_CLEANUP_DELETE_LIMIT);
+};
 
 const ensureBotUser = async () => {
   if (!BOT_ENABLED) return null;
@@ -306,7 +404,18 @@ const isBlockedEitherWay = async ({ aId, aIds, bId, bIds }) => {
   return false;
 };
 
+router.use((req, res, next) => {
+  if (req.method !== 'GET') {
+    void invalidateRoomsListCaches();
+  }
+  next();
+});
+
 router.get('/', asyncHandler(async (req, res) => {
+  const cacheKey = buildRoomsListCacheKey(req.query || {});
+  const cached = await getRoomsListCachedValue(cacheKey);
+  if (cached) return res.json(cached);
+
   // prefer DB-backed list but fall back to in-memory
   try {
     const { type, member, discover } = req.query || {};
@@ -411,6 +520,7 @@ router.get('/', asyncHandler(async (req, res) => {
     const mapped = filtered
       .map(d => ({ id: d._id, ...d }))
       .map(withDescriptionFallback);
+    await setRoomsListCachedValue(cacheKey, mapped);
     res.json(mapped);
     return;
   } catch (e) {
@@ -452,7 +562,9 @@ router.get('/', asyncHandler(async (req, res) => {
       deduped.push(r);
     }
 
-    res.json((deduped || []).map(withDescriptionFallback));
+    const fallbackMapped = (deduped || []).map(withDescriptionFallback);
+    await setRoomsListCachedValue(cacheKey, fallbackMapped);
+    res.json(fallbackMapped);
   }
 }));
 

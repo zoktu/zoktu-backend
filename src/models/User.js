@@ -81,5 +81,6 @@ const UserSchema = new mongoose.Schema({
 
   // Ensure displayName is unique across all users (case-insensitive). Run migration first to resolve existing duplicates.
   UserSchema.index({ displayName: 1 }, { unique: true, collation: { locale: 'en', strength: 2 }, sparse: true });
+  UserSchema.index({ isOnline: 1 });
 
   export default mongoose.models.User || mongoose.model('User', UserSchema);

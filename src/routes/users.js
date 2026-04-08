@@ -7,8 +7,123 @@ import User from '../models/User.js';
 import Room from '../models/Room.js';
 import DMRoom from '../models/DMRoom.js';
 import { containsProfanity } from '../middleware/profanityFilter.js';
+import { redisGetJson, redisSetJson } from '../lib/redis.js';
 
 const router = Router();
+
+const parsePositiveInt = (value, fallback) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+};
+
+const ONLINE_USERS_CACHE_KEY = 'users:online:snapshot:v1';
+const ONLINE_USERS_CACHE_TTL_SECONDS = parsePositiveInt(env.onlineUsersCacheTtlSeconds, 8);
+const ONLINE_USERS_CACHE_LOCAL_TTL_MS = ONLINE_USERS_CACHE_TTL_SECONDS * 1000;
+const ONLINE_USERS_CACHE_MAX_PAYLOAD_BYTES = parsePositiveInt(env.redisCacheMaxPayloadBytes, 64 * 1024);
+const ONLINE_USERS_CACHE_CLEANUP_DELETE_LIMIT = parsePositiveInt(env.redisCacheCleanupDeleteLimit, 200);
+const USERS_BATCH_CACHE_PREFIX = 'users:batch:v1:';
+const USERS_BATCH_CACHE_TTL_SECONDS = parsePositiveInt(env.usersBatchCacheTtlSeconds, 12);
+const USERS_BATCH_CACHE_LOCAL_TTL_MS = USERS_BATCH_CACHE_TTL_SECONDS * 1000;
+const USERS_BATCH_LOCAL_CACHE_MAX_ENTRIES = parsePositiveInt(env.usersBatchLocalCacheMaxEntries, 220);
+const USERS_BATCH_MAX_IDS = parsePositiveInt(env.usersBatchMaxIds, 50);
+
+let onlineUsersSnapshotInFlight = null;
+let onlineUsersLocalSnapshot = {
+  expiresAt: 0,
+  users: []
+};
+
+const usersBatchLocalCache = new Map();
+
+const compactHash = (value) => {
+  const input = String(value || '');
+  let hash = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = ((hash << 5) - hash) + input.charCodeAt(i);
+    hash |= 0;
+  }
+  return (hash >>> 0).toString(36);
+};
+
+const buildUsersBatchCacheKey = ({ requestedIds = [], viewerIds = [] }) => {
+  const idsPart = [...requestedIds].sort().join('|');
+  const viewerPart = [...viewerIds].sort().join('|');
+  const fingerprint = `${idsPart}::${viewerPart}`;
+  return `${USERS_BATCH_CACHE_PREFIX}${compactHash(fingerprint)}`;
+};
+
+const getUsersBatchLocalCache = (cacheKey) => {
+  const cached = usersBatchLocalCache.get(cacheKey);
+  if (!cached) return null;
+  if (Date.now() - Number(cached.ts || 0) > USERS_BATCH_CACHE_LOCAL_TTL_MS) {
+    usersBatchLocalCache.delete(cacheKey);
+    return null;
+  }
+  return Array.isArray(cached.value) ? cached.value : null;
+};
+
+const setUsersBatchLocalCache = (cacheKey, value) => {
+  if (!cacheKey || !Array.isArray(value)) return;
+
+  if (usersBatchLocalCache.size >= USERS_BATCH_LOCAL_CACHE_MAX_ENTRIES && !usersBatchLocalCache.has(cacheKey)) {
+    const overflow = usersBatchLocalCache.size - USERS_BATCH_LOCAL_CACHE_MAX_ENTRIES + 1;
+    const victims = Array.from(usersBatchLocalCache.entries())
+      .sort((a, b) => Number(a[1]?.ts || 0) - Number(b[1]?.ts || 0))
+      .slice(0, Math.max(0, overflow))
+      .map(([key]) => key);
+
+    for (const victim of victims) {
+      usersBatchLocalCache.delete(victim);
+    }
+  }
+
+  usersBatchLocalCache.set(cacheKey, { ts: Date.now(), value });
+};
+
+const setOnlineUsersLocalSnapshot = (list) => {
+  onlineUsersLocalSnapshot = {
+    expiresAt: Date.now() + ONLINE_USERS_CACHE_LOCAL_TTL_MS,
+    users: Array.isArray(list) ? list : []
+  };
+};
+
+const getOnlineUsersDbSnapshot = async () => {
+  if (Date.now() < Number(onlineUsersLocalSnapshot.expiresAt || 0)) {
+    return Array.isArray(onlineUsersLocalSnapshot.users) ? onlineUsersLocalSnapshot.users : [];
+  }
+
+  if (onlineUsersSnapshotInFlight) {
+    return onlineUsersSnapshotInFlight;
+  }
+
+  onlineUsersSnapshotInFlight = (async () => {
+    const redisCached = await redisGetJson(ONLINE_USERS_CACHE_KEY);
+    if (Array.isArray(redisCached)) {
+      setOnlineUsersLocalSnapshot(redisCached);
+      return redisCached;
+    }
+
+    const onlineDocs = await User.find({ isOnline: true }).lean().exec().catch(() => []);
+    const normalized = (onlineDocs || []).map((doc) => ({
+      ...doc,
+      id: String(doc?.guestId || doc?._id || '')
+    }));
+
+    setOnlineUsersLocalSnapshot(normalized);
+    void redisSetJson(ONLINE_USERS_CACHE_KEY, normalized, ONLINE_USERS_CACHE_TTL_SECONDS, {
+      cleanupPrefix: 'users:online:snapshot',
+      cleanupDeleteLimit: ONLINE_USERS_CACHE_CLEANUP_DELETE_LIMIT,
+      maxPayloadBytes: ONLINE_USERS_CACHE_MAX_PAYLOAD_BYTES
+    });
+    return normalized;
+  })();
+
+  try {
+    return await onlineUsersSnapshotInFlight;
+  } finally {
+    onlineUsersSnapshotInFlight = null;
+  }
+};
 
 const uniqStrings = (arr) => Array.from(new Set((arr || []).filter(Boolean).map((v) => String(v))));
 
@@ -84,6 +199,64 @@ const getAuthPayload = (req) => {
 };
 
 const looksLikeObjectId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
+const isLikelyBatchLookupId = (value) => {
+  const id = String(value || '').trim().replace(/^@+/, '');
+  if (!id) return false;
+
+  if (looksLikeObjectId(id)) return true;
+  if (id.startsWith('guest-')) return id.length >= 10;
+  if (/^\d{10,24}$/.test(id)) return true;
+  if (id.includes('@')) return id.length >= 5;
+
+  // Username-like IDs; avoid pure numeric short garbage (e.g., 44, 58, 149)
+  if (/^[a-zA-Z][a-zA-Z0-9._-]{1,32}$/.test(id)) return true;
+
+  if (String(env.botId || '') === id) return true;
+  return false;
+};
+
+const deriveBatchFallbackName = (user, requestedId = '') => {
+  const explicitName = String(user?.displayName || user?.username || user?.name || '').trim();
+  if (explicitName) return explicitName;
+
+  const email = String(user?.email || '').trim();
+  if (email.includes('@')) {
+    const local = email.split('@')[0]?.trim();
+    if (local) return local;
+  }
+
+  const idHint = String(user?.guestId || user?.id || user?._id || requestedId || '').trim();
+  if (idHint.startsWith('guest-')) {
+    const suffix = String(idHint.split('-').slice(-1)[0] || '').trim();
+    return suffix ? `Guest-${suffix}` : 'Guest';
+  }
+
+  if (/^\d{10,24}$/.test(idHint)) {
+    return `Guest-${idHint.slice(-6)}`;
+  }
+
+  return '';
+};
+
+const normalizeBatchLookupUser = (rawUser, requestedId = '') => {
+  if (!rawUser) return null;
+
+  const id = String(rawUser?.id || rawUser?.guestId || rawUser?._id || requestedId || '').trim();
+  if (!id) return null;
+
+  const fallbackName = deriveBatchFallbackName(rawUser, requestedId);
+  const name = String(rawUser?.name || '').trim() || fallbackName || 'User';
+  const displayName = String(rawUser?.displayName || '').trim() || name;
+  const username = String(rawUser?.username || '').trim() || displayName || name;
+
+  return {
+    ...rawUser,
+    id,
+    name,
+    displayName,
+    ...(username ? { username } : {})
+  };
+};
 const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
@@ -317,11 +490,7 @@ router.get('/', asyncHandler(async (req, res) => {
   // For online listings, also merge DB-backed users to avoid in-memory drift.
   if (online === true || online === 'true' || online === 1 || online === '1') {
     try {
-      const onlineDocs = await User.find({ isOnline: true }).lean().exec().catch(() => []);
-      const normalized = (onlineDocs || []).map((doc) => ({
-        ...doc,
-        id: String(doc?.guestId || doc?._id || '')
-      }));
+      const normalized = await getOnlineUsersDbSnapshot();
       raw = [...raw, ...normalized];
     } catch (e) {
       // ignore DB fallback failures
@@ -369,6 +538,112 @@ router.get('/', asyncHandler(async (req, res) => {
   }
 
   res.json(unique.map((u) => filterUserForViewer({ viewerIds, user: u })));
+}));
+
+// Lightweight batch lookup for chat member hydration.
+// Returns compact profiles for the requested IDs without expensive per-user derived stats.
+router.get('/batch', asyncHandler(async (req, res) => {
+  const idsQuery = req.query?.ids;
+  const rawIds = Array.isArray(idsQuery)
+    ? idsQuery.flatMap((entry) => String(entry || '').split(','))
+    : String(idsQuery || '').split(',');
+
+  const requestedIds = uniqStrings(
+    rawIds
+      .map((value) => String(value || '').trim().replace(/^@+/, ''))
+      .filter(Boolean)
+      .filter((id) => isLikelyBatchLookupId(id))
+  ).slice(0, USERS_BATCH_MAX_IDS);
+
+  if (!requestedIds.length) {
+    return res.json([]);
+  }
+
+  const viewerIdsSet = await getViewerIdsFromReq(req);
+  const viewerIds = uniqStrings(Array.from(viewerIdsSet || []));
+  const cacheKey = buildUsersBatchCacheKey({ requestedIds, viewerIds });
+
+  const localCached = getUsersBatchLocalCache(cacheKey);
+  if (localCached) {
+    return res.json(localCached);
+  }
+
+  const redisCached = await redisGetJson(cacheKey);
+  if (Array.isArray(redisCached)) {
+    setUsersBatchLocalCache(cacheKey, redisCached);
+    return res.json(redisCached);
+  }
+
+  const objectIds = requestedIds.filter((id) => looksLikeObjectId(id));
+
+  const or = [
+    { guestId: { $in: requestedIds } },
+    { email: { $in: requestedIds } },
+    { username: { $in: requestedIds } }
+  ];
+  if (objectIds.length) {
+    or.unshift({ _id: { $in: objectIds } });
+  }
+
+  const docs = await User.find({ $or: or })
+    .select('_id guestId email username name displayName avatar photoURL userType isAnonymous emailVerified premiumStatus premiumUntil premiumExpiry isPremium isOnline settings friends')
+    .lean()
+    .exec()
+    .catch(() => []);
+
+  const normalizedDbUsers = (docs || [])
+    .map((doc) => normalizeBatchLookupUser(doc))
+    .filter(Boolean);
+
+  const normalizedInMemoryUsers = requestedIds
+    .map((id) => normalizeBatchLookupUser(users.get(String(id)), id))
+    .filter(Boolean);
+
+  const normalized = uniqUsers([...normalizedDbUsers, ...normalizedInMemoryUsers]);
+
+  const filtered = normalized.map((u) => filterUserForViewer({ viewerIds: viewerIdsSet, user: u }));
+
+  // Keep response deterministically aligned to requested ids where possible.
+  const byAlias = new Map();
+  for (const user of filtered) {
+    const aliases = uniqStrings([
+      user?.id,
+      user?._id,
+      user?.guestId,
+      user?.email,
+      user?.username
+    ]);
+    for (const alias of aliases) {
+      byAlias.set(String(alias), user);
+    }
+  }
+
+  const ordered = [];
+  const seenCanonical = new Set();
+  for (const id of requestedIds) {
+    const hit = byAlias.get(String(id));
+    if (!hit) continue;
+    const canonical = String(hit?.id || hit?._id || hit?.guestId || id);
+    if (seenCanonical.has(canonical)) continue;
+    seenCanonical.add(canonical);
+    ordered.push(hit);
+  }
+
+  for (const user of filtered) {
+    const canonical = String(user?.id || user?._id || user?.guestId || '');
+    if (!canonical || seenCanonical.has(canonical)) continue;
+    seenCanonical.add(canonical);
+    ordered.push(user);
+  }
+
+  setUsersBatchLocalCache(cacheKey, ordered);
+  void redisSetJson(cacheKey, ordered, USERS_BATCH_CACHE_TTL_SECONDS, {
+    cleanupPrefix: USERS_BATCH_CACHE_PREFIX,
+    cleanupDeleteLimit: ONLINE_USERS_CACHE_CLEANUP_DELETE_LIMIT,
+    maxPayloadBytes: ONLINE_USERS_CACHE_MAX_PAYLOAD_BYTES
+  });
+
+  res.json(ordered);
 }));
 
 // Get user by id (uses in-memory map seeded from DB)

@@ -17,6 +17,12 @@ import { checkGlobalBan } from './middleware/globalBanMiddleware.js';
 import GlobalBan from './models/GlobalBan.js';
 import { containsBlockedExternalLink } from './middleware/profanityFilter.js';
 import { upsertUserInMemory, updateUserPresenceInMemory } from './lib/userStore.js';
+import { createSocketIoRedisAdapter } from './lib/redis.js';
+import { pruneOldMessagesForRoom } from './lib/messageRetention.js';
+import {
+  getRoomDocByIdWithCache as getRoomDocById,
+  updateRoomDocByIdWithCache as updateRoomDocById
+} from './lib/roomCache.js';
 
 const app = express();
 // Trust the first proxy (Render) so rate limiting uses correct client IP instead of Render's proxy IP
@@ -53,6 +59,37 @@ const corsOptions = {
 const parsePositiveInt = (raw, fallback) => {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+const parseIdsCount = (rawIds) => {
+  if (Array.isArray(rawIds)) {
+    return rawIds
+      .flatMap((entry) => String(entry || '').split(','))
+      .map((id) => String(id || '').trim())
+      .filter(Boolean).length;
+  }
+
+  return String(rawIds || '')
+    .split(',')
+    .map((id) => String(id || '').trim())
+    .filter(Boolean).length;
+};
+
+const formatSlowRequestPath = (req) => {
+  const pathOnly = String(req?.path || req?.url || '').trim();
+  const originalUrl = String(req?.originalUrl || pathOnly || '').trim();
+
+  if (pathOnly === '/api/users/batch') {
+    const idsCount = parseIdsCount(req?.query?.ids);
+    return `${pathOnly}?idsCount=${idsCount}`;
+  }
+
+  const MAX_LOG_URL_LENGTH = 220;
+  if (originalUrl.length > MAX_LOG_URL_LENGTH) {
+    return `${originalUrl.slice(0, MAX_LOG_URL_LENGTH)}…`;
+  }
+
+  return originalUrl || pathOnly || '/';
 };
 
 // ✅ Security: Rate Limiting — prevents API abuse and brute-force attacks
@@ -93,7 +130,8 @@ app.use((req, res, next) => {
   res.on('finish', () => {
     const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
     if (elapsedMs >= slowApiThresholdMs && req.path !== '/api/health' && req.path !== '/health') {
-      console.warn(`[SLOW_API] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${elapsedMs.toFixed(1)}ms)`);
+      const logPath = formatSlowRequestPath(req);
+      console.warn(`[SLOW_API] ${req.method} ${logPath} -> ${res.statusCode} (${elapsedMs.toFixed(1)}ms)`);
     }
   });
   next();
@@ -224,47 +262,6 @@ const getMessageCharLimitForSender = async (senderId) => {
     .catch(() => null);
 
   return isVipUserRecord(userDoc) ? VIP_MESSAGE_CHAR_LIMIT : NORMAL_MESSAGE_CHAR_LIMIT;
-};
-
-const updateRoomDocById = async (id, update) => {
-  if (!id) return null;
-  const preferDm = String(id).startsWith('dm-');
-  const primary = preferDm ? DMRoom : Room;
-  const secondary = preferDm ? Room : DMRoom;
-
-  await primary.findByIdAndUpdate(id, update).catch(() => null);
-  let doc = await primary.findById(id).lean().catch(() => null);
-  if (doc) return doc;
-
-  await secondary.findByIdAndUpdate(id, update).catch(() => null);
-  doc = await secondary.findById(id).lean().catch(() => null);
-  return doc;
-};
-
-const roomCache = new Map();
-const ROOM_CACHE_TTL = 30000; // 30 seconds
-
-const getRoomDocById = async (id) => {
-  if (!id) return null;
-  
-  const cached = roomCache.get(id);
-  if (cached && (Date.now() - cached.ts < ROOM_CACHE_TTL)) {
-    return cached.doc;
-  }
-
-  const preferDm = String(id).startsWith('dm-');
-  const primary = preferDm ? DMRoom : Room;
-  const secondary = preferDm ? Room : DMRoom;
-
-  let doc = await primary.findById(id).lean().catch(() => null);
-  if (!doc) {
-    doc = await secondary.findById(id).lean().catch(() => null);
-  }
-
-  if (doc) {
-    roomCache.set(id, { doc, ts: Date.now() });
-  }
-  return doc;
 };
 
 const isUserMuted = (userId) => {
@@ -576,6 +573,11 @@ io.on('connection', (socket) => {
           
           const doc = new Model({ roomId, senderId: senderIdEffective, senderName: nameForDb, content: contentText, type: 'text' });
           await doc.save();
+          void pruneOldMessagesForRoom({
+            Model,
+            roomId: String(roomId),
+            keepLatest: ROOM_MESSAGE_RETENTION_LIMIT
+          });
           
           const msg = { 
             id: doc._id.toString(), 
@@ -618,6 +620,24 @@ io.on('connection', (socket) => {
 
 const start = async () => {
   await connectDb();
+
+  try {
+    const redisAdapter = await createSocketIoRedisAdapter();
+    if (redisAdapter) {
+      io.adapter(redisAdapter);
+      console.log('✅ Socket.IO Redis adapter enabled');
+    }
+  } catch (e) {
+    console.warn('⚠️ Could not enable Socket.IO Redis adapter', e?.message || e);
+  }
+
+  // Ensure hot-path index exists even when DB_AUTO_INDEX is disabled in production.
+  try {
+    await User.collection.createIndex({ isOnline: 1 }, { name: 'isOnline_1', background: true });
+  } catch (e) {
+    // best-effort
+  }
+
   // seed in-memory user store from MongoDB
   try {
     const { seedUsersFromDb } = await import('./lib/userStore.js');

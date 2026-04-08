@@ -62,6 +62,21 @@ env.vapidSubject = env.webPushSubject;
 
 // Redis URL for pub/sub and queues
 env.redisUrl = process.env.REDIS_URL || process.env.REDIS_URI || '';
+env.redisEnabled = process.env.REDIS_ENABLED || '';
+env.redisMaxReconnectRetries = process.env.REDIS_MAX_RECONNECT_RETRIES || '';
+env.redisRoomCacheTtlSeconds = process.env.REDIS_ROOM_CACHE_TTL_SECONDS || '';
+env.roomCacheMaxEntries = process.env.ROOM_CACHE_MAX_ENTRIES || '';
+env.redisCacheMaxPayloadBytes = process.env.REDIS_CACHE_MAX_PAYLOAD_BYTES || '';
+env.redisCacheCleanupDeleteLimit = process.env.REDIS_CACHE_CLEANUP_DELETE_LIMIT || '';
+env.roomsListCacheTtlSeconds = process.env.ROOMS_LIST_CACHE_TTL_SECONDS || '';
+env.roomsListCacheMaxEntries = process.env.ROOMS_LIST_CACHE_MAX_ENTRIES || '';
+env.onlineUsersCacheTtlSeconds = process.env.ONLINE_USERS_CACHE_TTL_SECONDS || '';
+env.usersBatchCacheTtlSeconds = process.env.USERS_BATCH_CACHE_TTL_SECONDS || '';
+env.usersBatchMaxIds = process.env.USERS_BATCH_MAX_IDS || '50';
+env.usersBatchLocalCacheMaxEntries = process.env.USERS_BATCH_LOCAL_CACHE_MAX_ENTRIES || '';
+env.messageRetentionLimit = process.env.MESSAGE_RETENTION_LIMIT || '50';
+env.messagePruneBatchSize = process.env.MESSAGE_PRUNE_BATCH_SIZE || '500';
+env.messagePruneMinIntervalMs = process.env.MESSAGE_PRUNE_MIN_INTERVAL_MS || '5000';
 
 // Prerender service (optional) - e.g., https://service.prerender.io
 env.prerenderServiceUrl = process.env.PRERENDER_SERVICE_URL || '';
