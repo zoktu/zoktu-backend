@@ -28,6 +28,7 @@ const USERS_BATCH_LOCAL_CACHE_MAX_ENTRIES = parsePositiveInt(env.usersBatchLocal
 const USERS_BATCH_MAX_IDS = parsePositiveInt(env.usersBatchMaxIds, 50);
 const USER_PROFILE_STATS_CACHE_TTL_MS = 30 * 1000;
 const USER_PROFILE_STATS_CACHE_MAX_ENTRIES = 1500;
+const USER_SAFE_PROFILE_SELECT = '_id guestId email username name displayName avatar photoURL userType isAnonymous emailVerified premiumStatus premiumUntil premiumExpiry isPremium isOnline lastSeen createdAt updatedAt bio age gender dob location settings friends followers following blockedUsers';
 
 let onlineUsersSnapshotInFlight = null;
 let onlineUsersLocalSnapshot = {
@@ -139,7 +140,11 @@ const getOnlineUsersDbSnapshot = async () => {
       return redisCached;
     }
 
-    const onlineDocs = await User.find({ isOnline: true }).lean().exec().catch(() => []);
+    const onlineDocs = await User.find({ isOnline: true })
+      .select(USER_SAFE_PROFILE_SELECT)
+      .lean()
+      .exec()
+      .catch(() => []);
     const normalized = (onlineDocs || []).map((doc) => ({
       ...doc,
       id: String(doc?.guestId || doc?._id || '')
@@ -518,6 +523,76 @@ const filterUserForViewer = ({ viewerIds, user }) => {
   return { ...user, avatar: null, photoURL: null };
 };
 
+const SENSITIVE_USER_RESPONSE_FIELDS = [
+  'password',
+  'resetToken',
+  'resetTokenExpires',
+  'emailVerificationToken',
+  'emailVerificationTokenExpires',
+  'sessions',
+  'lastIp',
+  'guestInitialIp',
+  'guestDeviceId',
+  'deletePending',
+  'deleteRequestedAt',
+  'deleteScheduledFor',
+  '__v',
+  '_profileViewers'
+];
+
+const PRIVATE_USER_RESPONSE_FIELDS_FOR_OTHERS = [
+  'email',
+  'settings',
+  'friends',
+  'blockedUsers',
+  'followers',
+  'following',
+  'subscription'
+];
+
+const isViewerSelfUser = ({ viewerIds, user }) => {
+  const viewerSet = new Set(uniqStrings(Array.from(viewerIds || [])));
+  if (!viewerSet.size || !user) return false;
+
+  const targetAliases = uniqStrings([user.id, user._id, user.guestId, user.email, user.username]);
+  return targetAliases.some((alias) => viewerSet.has(String(alias)));
+};
+
+const sanitizeUserForViewer = ({ viewerIds, user }) => {
+  if (!user || typeof user !== 'object') return user;
+
+  const safe = { ...user };
+  const friendsCount = Array.isArray(safe.friends) ? safe.friends.length : Number(safe.friendsCount || 0);
+  const followersCount = Array.isArray(safe.followers) ? safe.followers.length : Number(safe.followersCount || 0);
+  const followingCount = Array.isArray(safe.following) ? safe.following.length : Number(safe.followingCount || 0);
+
+  safe.id = String(safe.id || safe.guestId || safe._id || '').trim();
+
+  for (const field of SENSITIVE_USER_RESPONSE_FIELDS) {
+    delete safe[field];
+  }
+
+  if (Number.isFinite(friendsCount)) safe.friendsCount = friendsCount;
+  if (Number.isFinite(followersCount)) safe.followersCount = followersCount;
+  if (Number.isFinite(followingCount)) safe.followingCount = followingCount;
+
+  const isSelf = isViewerSelfUser({ viewerIds, user: safe });
+  if (!isSelf) {
+    for (const field of PRIVATE_USER_RESPONSE_FIELDS_FOR_OTHERS) {
+      delete safe[field];
+    }
+  }
+
+  return safe;
+};
+
+const presentUserForViewer = ({ viewerIds, user }) => (
+  sanitizeUserForViewer({
+    viewerIds,
+    user: filterUserForViewer({ viewerIds, user })
+  })
+);
+
 // Return all users known in-memory (seeded from DB at startup)
 router.get('/', asyncHandler(async (req, res) => {
   const online = req.query?.online;
@@ -565,15 +640,15 @@ router.get('/', asyncHandler(async (req, res) => {
         if (meId && u.id && String(u.id) === String(meId)) return false;
         return true;
       });
-    return res.json(filtered.slice(0, 25).map((u) => filterUserForViewer({ viewerIds, user: u })));
+    return res.json(filtered.slice(0, 25).map((u) => presentUserForViewer({ viewerIds, user: u })));
   }
 
   // Optional: filter online users
   if (online === true || online === 'true' || online === 1 || online === '1') {
-    return res.json(unique.filter((u) => isUserOnline(u)).map((u) => filterUserForViewer({ viewerIds, user: u })));
+    return res.json(unique.filter((u) => isUserOnline(u)).map((u) => presentUserForViewer({ viewerIds, user: u })));
   }
 
-  res.json(unique.map((u) => filterUserForViewer({ viewerIds, user: u })));
+  res.json(unique.map((u) => presentUserForViewer({ viewerIds, user: u })));
 }));
 
 // Lightweight batch lookup for chat member hydration.
@@ -601,13 +676,13 @@ router.get('/batch', asyncHandler(async (req, res) => {
 
   const localCached = getUsersBatchLocalCache(cacheKey);
   if (localCached) {
-    return res.json(localCached);
+    return res.json(localCached.map((u) => presentUserForViewer({ viewerIds: viewerIdsSet, user: u })));
   }
 
   const redisCached = await redisGetJson(cacheKey);
   if (Array.isArray(redisCached)) {
     setUsersBatchLocalCache(cacheKey, redisCached);
-    return res.json(redisCached);
+    return res.json(redisCached.map((u) => presentUserForViewer({ viewerIds: viewerIdsSet, user: u })));
   }
 
   const objectIds = requestedIds.filter((id) => looksLikeObjectId(id));
@@ -637,7 +712,7 @@ router.get('/batch', asyncHandler(async (req, res) => {
 
   const normalized = uniqUsers([...normalizedDbUsers, ...normalizedInMemoryUsers]);
 
-  const filtered = normalized.map((u) => filterUserForViewer({ viewerIds: viewerIdsSet, user: u }));
+  const filtered = normalized.map((u) => presentUserForViewer({ viewerIds: viewerIdsSet, user: u }));
 
   // Keep response deterministically aligned to requested ids where possible.
   const byAlias = new Map();
@@ -704,7 +779,7 @@ router.get('/:id', asyncHandler(async (req, res) => {
       isOnline: true
     };
     users.set(requestedId, botProfile);
-    return res.json(filterUserForViewer({ viewerIds, user: botProfile }));
+    return res.json(presentUserForViewer({ viewerIds, user: botProfile }));
   }
 
   // Remove early return from cache to ensure stats are always freshly calculated
@@ -805,7 +880,7 @@ router.get('/:id', asyncHandler(async (req, res) => {
       } catch (e) {
         // ignore
       }
-      return res.json(filterUserForViewer({ viewerIds, user: entry }));
+      return res.json(presentUserForViewer({ viewerIds, user: entry }));
     }
   } catch (e) {
     // ignore
@@ -825,7 +900,7 @@ router.get('/:id', asyncHandler(async (req, res) => {
     };
     users.set(req.params.id, existingMem);
   }
-  return res.json(filterUserForViewer({ viewerIds, user: existingMem }));
+  return res.json(presentUserForViewer({ viewerIds, user: existingMem }));
 }));
 
 const getAuthedUserDoc = async (payload, userIdParam) => {
@@ -1033,6 +1108,7 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   if (!payload) return res.status(401).json({ message: 'Unauthorized' });
   const ok = await authMatchesUserId(payload, userIdParam);
   if (!ok) return res.status(403).json({ message: 'Forbidden' });
+  const viewerIds = await getViewerIdsFromReq(req);
 
   let existing = users.get(userIdParam) || { id: userIdParam };
 
@@ -1140,7 +1216,7 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     if (saved) {
       // saved is a lean Mongo doc - update in-memory store with canonical data
       syncUserStoreEntry(saved);
-      return res.json(saved);
+      return res.json(presentUserForViewer({ viewerIds, user: saved }));
     }
   } catch (e) {
     console.warn('Could not persist user update to DB', e?.message || e);
@@ -1148,7 +1224,7 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   }
 
   // If nothing was saved, respond with the updated in-memory record
-  res.json(updated);
+  res.json(presentUserForViewer({ viewerIds, user: updated }));
 }));
 
 router.post('/:id/block', asyncHandler(async (req, res) => {

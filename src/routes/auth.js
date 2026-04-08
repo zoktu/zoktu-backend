@@ -306,17 +306,34 @@ const signToken = (user, sessionId) => jwt.sign({
   sessionId: sessionId || undefined
 }, env.jwtSecret, { expiresIn: '7d' });
 
+const AUTH_SENSITIVE_USER_FIELDS = [
+  'password',
+  'resetToken',
+  'resetTokenExpires',
+  'emailVerificationToken',
+  'emailVerificationTokenExpires',
+  'sessions',
+  'lastIp',
+  'guestInitialIp',
+  'guestDeviceId',
+  'deleteRequestedAt',
+  'deleteScheduledFor',
+  'deletePending',
+  '__v',
+  '_profileViewers'
+];
+
 const sanitizeUser = (user) => {
-  if (!user) return null;
-  const {
-    password,
-    resetToken,
-    resetTokenExpires,
-    deleteRequestedAt,
-    deleteScheduledFor,
-    deletePending,
-    ...safeUser
-  } = user;
+  if (!user || typeof user !== 'object') return null;
+
+  const safeUser = { ...user };
+  for (const field of AUTH_SENSITIVE_USER_FIELDS) {
+    delete safeUser[field];
+  }
+
+  const normalizedId = String(safeUser.id || safeUser.guestId || safeUser._id || '').trim();
+  if (normalizedId) safeUser.id = normalizedId;
+
   return safeUser;
 };
 
@@ -869,7 +886,7 @@ router.post('/guest', asyncHandler(async (req, res) => {
       return res.status(500).json({ message: 'Unable to create session' });
     }
     const token = signToken(user, sessionId);
-    return res.json({ user, token, sessionId });
+    return res.json({ user: sanitizeUser(user), token, sessionId });
   } catch (e) {
     // Duplicate key may happen if another request inserted the same name concurrently
     if (e && e.code === 11000) {
@@ -900,7 +917,7 @@ router.post('/guest', asyncHandler(async (req, res) => {
       return res.status(500).json({ message: 'Unable to create session' });
     }
     const token = signToken(user, sessionId);
-    return res.json({ user, token, sessionId });
+    return res.json({ user: sanitizeUser(user), token, sessionId });
   }
 }));
 
