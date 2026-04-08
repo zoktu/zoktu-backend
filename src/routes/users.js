@@ -26,6 +26,8 @@ const USERS_BATCH_CACHE_TTL_SECONDS = parsePositiveInt(env.usersBatchCacheTtlSec
 const USERS_BATCH_CACHE_LOCAL_TTL_MS = USERS_BATCH_CACHE_TTL_SECONDS * 1000;
 const USERS_BATCH_LOCAL_CACHE_MAX_ENTRIES = parsePositiveInt(env.usersBatchLocalCacheMaxEntries, 220);
 const USERS_BATCH_MAX_IDS = parsePositiveInt(env.usersBatchMaxIds, 50);
+const USER_PROFILE_STATS_CACHE_TTL_MS = 30 * 1000;
+const USER_PROFILE_STATS_CACHE_MAX_ENTRIES = 1500;
 
 let onlineUsersSnapshotInFlight = null;
 let onlineUsersLocalSnapshot = {
@@ -34,6 +36,7 @@ let onlineUsersLocalSnapshot = {
 };
 
 const usersBatchLocalCache = new Map();
+const userProfileStatsCache = new Map();
 
 const compactHash = (value) => {
   const input = String(value || '');
@@ -78,6 +81,39 @@ const setUsersBatchLocalCache = (cacheKey, value) => {
   }
 
   usersBatchLocalCache.set(cacheKey, { ts: Date.now(), value });
+};
+
+const readUserProfileStatsCache = (cacheKey) => {
+  const key = String(cacheKey || '').trim();
+  if (!key) return null;
+
+  const cached = userProfileStatsCache.get(key);
+  if (!cached) return null;
+  if (Date.now() - Number(cached.ts || 0) > USER_PROFILE_STATS_CACHE_TTL_MS) {
+    userProfileStatsCache.delete(key);
+    return null;
+  }
+
+  return cached.value || null;
+};
+
+const writeUserProfileStatsCache = (cacheKey, value) => {
+  const key = String(cacheKey || '').trim();
+  if (!key || !value) return;
+
+  if (userProfileStatsCache.size >= USER_PROFILE_STATS_CACHE_MAX_ENTRIES && !userProfileStatsCache.has(key)) {
+    const overflow = userProfileStatsCache.size - USER_PROFILE_STATS_CACHE_MAX_ENTRIES + 1;
+    const victims = Array.from(userProfileStatsCache.entries())
+      .sort((a, b) => Number(a[1]?.ts || 0) - Number(b[1]?.ts || 0))
+      .slice(0, Math.max(0, overflow))
+      .map(([victimKey]) => victimKey);
+
+    for (const victimKey of victims) {
+      userProfileStatsCache.delete(victimKey);
+    }
+  }
+
+  userProfileStatsCache.set(key, { ts: Date.now(), value });
 };
 
 const setOnlineUsersLocalSnapshot = (list) => {
@@ -724,14 +760,24 @@ router.get('/:id', asyncHandler(async (req, res) => {
       if (doc?.email) idsSet.add(String(doc.email));
       if (doc?.username) idsSet.add(String(doc.username));
       const ids = Array.from(idsSet);
+      const statsCacheKey = uniqStrings(ids).sort().join('|');
 
       const derivedUsername = doc.username || doc.displayName || doc.name || (doc.email ? String(doc.email).split('@')[0] : undefined);
-      
-      // Calculate real-time stats (using expanded IDs to match any participant identifier)
-      const [roomsCount, dmRoomsCount] = await Promise.all([
-        Room.countDocuments({ $or: [{ participants: { $in: ids } }, { members: { $in: ids } }] }),
-        DMRoom.countDocuments({ $or: [{ participants: { $in: ids } }, { members: { $in: ids } }] })
-      ]);
+
+      const cachedStats = readUserProfileStatsCache(statsCacheKey);
+      let roomsCount = Number(cachedStats?.roomsCount || 0);
+      let dmRoomsCount = Number(cachedStats?.dmRoomsCount || 0);
+
+      if (!cachedStats) {
+        // Calculate real-time stats (using expanded IDs to match any participant identifier)
+        [roomsCount, dmRoomsCount] = await Promise.all([
+          Room.countDocuments({ $or: [{ participants: { $in: ids } }, { members: { $in: ids } }] }),
+          DMRoom.countDocuments({ $or: [{ participants: { $in: ids } }, { members: { $in: ids } }] })
+        ]);
+
+        writeUserProfileStatsCache(statsCacheKey, { roomsCount, dmRoomsCount });
+      }
+
       const totalRooms = roomsCount + dmRoomsCount;
 
       const views = (doc.profileViews?.count || 0);
