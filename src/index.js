@@ -115,7 +115,24 @@ const authLimiter = rateLimit({
 
 // Allow stricter CORS in production, but permit known frontend origins.
 app.use(cors(corsOptions));
-app.use(helmet());
+const securityHeaders = helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      baseUri: ["'self'"],
+      frameAncestors: ["'none'"],
+      formAction: ["'self'"]
+    }
+  },
+  frameguard: { action: 'deny' },
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  crossOriginResourcePolicy: { policy: 'same-origin' },
+  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+  hsts: env.nodeEnv === 'production'
+    ? { maxAge: 31536000, includeSubDomains: true, preload: true }
+    : false
+});
+app.use(securityHeaders);
 // HTTP response compression (gzip/brotli where supported)
 app.use(compression());
 const slowApiThresholdMs = parsePositiveInt(env.slowApiThresholdMs, 300);
