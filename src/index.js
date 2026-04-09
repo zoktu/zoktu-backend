@@ -27,11 +27,14 @@ import {
 const app = express();
 // Trust the first proxy (Render) so rate limiting uses correct client IP instead of Render's proxy IP
 app.set('trust proxy', 1);
+app.disable('x-powered-by');
+
+const normalizeOrigin = (origin) => String(origin || '').trim().toLowerCase().replace(/\/$/, '');
 
 const buildAllowedOrigins = () => {
   const raw = String(env.clientOrigin || '').trim();
   const fromEnv = raw
-    ? raw.split(',').map((s) => s.trim()).filter(Boolean)
+    ? raw.split(',').map((s) => normalizeOrigin(s)).filter(Boolean)
     : [];
 
   const defaults = [
@@ -41,7 +44,7 @@ const buildAllowedOrigins = () => {
     'http://localhost:5173'
   ];
 
-  return Array.from(new Set([...defaults, ...fromEnv]));
+  return Array.from(new Set([...defaults.map(normalizeOrigin), ...fromEnv]));
 };
 
 const allowedOrigins = buildAllowedOrigins();
@@ -49,11 +52,36 @@ const allowedOrigins = buildAllowedOrigins();
 const corsOptions = {
   origin(origin, callback) {
     if (!origin) return callback(null, true);
-    if (env.nodeEnv !== 'production') return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
+    const normalizedOrigin = normalizeOrigin(origin);
+    if (allowedOrigins.includes(normalizedOrigin)) return callback(null, true);
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   credentials: true
+};
+
+const helmetOptions = {
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      defaultSrc: ["'self'"],
+      baseUri: ["'self'"],
+      frameAncestors: ["'none'"],
+      objectSrc: ["'none'"],
+      formAction: ["'self'"],
+      connectSrc: ["'self'", ...allowedOrigins]
+    }
+  },
+  frameguard: {
+    action: 'deny'
+  },
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  },
+  referrerPolicy: {
+    policy: 'strict-origin-when-cross-origin'
+  }
 };
 
 const parsePositiveInt = (raw, fallback) => {
@@ -113,16 +141,24 @@ const authLimiter = rateLimit({
   skip: (req) => env.nodeEnv !== 'production',
 });
 
-// Allow stricter CORS in production, but permit known frontend origins.
+// Restrict CORS to known frontend origins across environments.
 app.use(cors(corsOptions));
-app.use(helmet());
+app.use(helmet(helmetOptions));
 // HTTP response compression (gzip/brotli where supported)
 app.use(compression());
 const slowApiThresholdMs = parsePositiveInt(env.slowApiThresholdMs, 300);
-const shouldSkipAccessLog = (req) => req.path === '/api/health' || req.path === '/health' || req.path === '/';
+const shouldSkipAccessLog = (req) => {
+  const path = String(req?.path || '').trim();
+  return path === '/api/health' || path === '/health' || path === '/' || path.startsWith('/api/sessions');
+};
 app.use(morgan(env.nodeEnv === 'production' ? 'tiny' : 'dev', { skip: shouldSkipAccessLog }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
+app.use((req, res, next) => {
+  // Reduce server time disclosure in default HTTP response headers.
+  res.sendDate = false;
+  next();
+});
 
 // Lightweight slow request monitor for operational visibility.
 app.use((req, res, next) => {
@@ -171,7 +207,15 @@ app.use(errorHandler);
 // HTTP server + socket.io for real-time pairing/messaging
 const httpServer = createServer(app);
 const io = new IOServer(httpServer, {
-  cors: { origin: allowedOrigins, methods: ['GET', 'POST'] }
+  cors: {
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(normalizeOrigin(origin))) return callback(null, true);
+      return callback(new Error(`Socket.IO CORS blocked for origin: ${origin}`));
+    },
+    methods: ['GET', 'POST'],
+    credentials: true
+  }
 });
 app.set('io', io);
 
