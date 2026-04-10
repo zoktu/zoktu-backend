@@ -670,6 +670,43 @@ const isVipUserRecord = (userDoc) => {
   );
 };
 
+const sanitizePollMetaInput = (candidate, createdByFallback = '') => {
+  if (!candidate || typeof candidate !== 'object') return null;
+
+  const question = String(candidate.question || '').trim().slice(0, 160);
+  const rawOptions = Array.isArray(candidate.options) ? candidate.options : [];
+
+  const options = [];
+  for (let idx = 0; idx < rawOptions.length; idx += 1) {
+    const option = rawOptions[idx];
+    const text = String(option?.text || '').trim().slice(0, 120);
+    if (!text) continue;
+    const id = String(option?.id || `opt-${idx + 1}`).trim() || `opt-${idx + 1}`;
+    options.push({ id, text, voters: [] });
+  }
+
+  if (!question || options.length < 2) return null;
+
+  return {
+    question,
+    options: options.slice(0, 6),
+    createdBy: String(createdByFallback || '').trim(),
+    createdAt: new Date().toISOString()
+  };
+};
+
+const sanitizeMessageMetaInput = ({ rawMeta, messageType, senderIdEffective }) => {
+  if (!rawMeta || typeof rawMeta !== 'object') return undefined;
+
+  const nextMeta = {};
+  if (String(messageType || '') === 'poll') {
+    const poll = sanitizePollMetaInput(rawMeta.poll, senderIdEffective);
+    if (poll) nextMeta.poll = poll;
+  }
+
+  return Object.keys(nextMeta).length ? nextMeta : undefined;
+};
+
 const getMessageCharLimitForIdentifiers = async (identifiers = []) => {
   const normalized = Array.from(new Set((identifiers || []).map((v) => String(v || '').trim()).filter(Boolean)));
   if (!normalized.length) return NORMAL_MESSAGE_CHAR_LIMIT;
@@ -1460,6 +1497,11 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     : [];
 
   const normalizedType = String(req.body?.type || 'text').toLowerCase();
+  const safeMeta = sanitizeMessageMetaInput({
+    rawMeta: req.body?.meta,
+    messageType: normalizedType,
+    senderIdEffective
+  });
   const rawContent = typeof content === 'string' ? content : String(content ?? '');
   const trimmedContent = rawContent.trim();
   const mediaFallbackByType = {
@@ -1485,7 +1527,8 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     content: encryptMessageContent(contentForStorage),
     type: normalizedType || 'text',
     replyTo: replyTo ? String(replyTo) : undefined,
-    attachments: safeAttachments
+    attachments: safeAttachments,
+    ...(safeMeta ? { meta: safeMeta } : {})
   });
   // Broadcast instantly via WebSocket for WhatsApp-like instant experience
   try {
@@ -1500,7 +1543,8 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
         type: doc.type,
         attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
         timestamp: new Date().toISOString(),
-        replyTo: doc.replyTo
+        replyTo: doc.replyTo,
+        meta: doc.meta || {}
       });
     }
   } catch (err) {}
@@ -1543,7 +1587,8 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     type: doc.type,
     attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
     timestamp: doc.createdAt.toISOString(),
-    replyTo: doc.replyTo
+    replyTo: doc.replyTo,
+    meta: doc.meta || {}
   });
 }));
 
@@ -1760,6 +1805,143 @@ router.delete('/messages/:id', asyncHandler(async (req, res) => {
   } catch (e) {
     return res.status(500).json({ message: 'Delete failed' });
   }
+}));
+
+router.post('/messages/:id/poll/vote', asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const optionId = String(req.body?.optionId || '').trim();
+  if (!optionId) return res.status(400).json({ message: 'optionId required' });
+
+  const { doc } = await findMessageDocById(id);
+  if (!doc) return res.status(404).json({ message: 'Message not found' });
+
+  const roomDoc = await getRoomDocById(String(doc.roomId)).catch(() => null);
+  if (roomDoc) {
+    const participantIds = Array.from(
+      new Set([
+        ...((roomDoc.participants || []).map(String)),
+        ...((roomDoc.members || []).map(String)),
+        String(roomDoc.owner || ''),
+        String(roomDoc.createdBy || '')
+      ].filter(Boolean))
+    );
+
+    if (participantIds.length) {
+      const isMember = (auth.ids || []).some((candidate) => participantIds.includes(String(candidate)));
+      if (!isMember) return res.status(403).json({ message: 'Only room members can vote in this poll' });
+    }
+  }
+
+  const currentMeta = (doc.meta && typeof doc.meta === 'object') ? doc.meta : {};
+  const pollRaw = currentMeta.poll;
+  if (!pollRaw || typeof pollRaw !== 'object') {
+    return res.status(400).json({ message: 'This message does not contain a poll' });
+  }
+
+  const question = String(pollRaw.question || '').trim();
+  const rawOptions = Array.isArray(pollRaw.options) ? pollRaw.options : [];
+  const normalizedOptions = rawOptions
+    .map((option, idx) => ({
+      id: String(option?.id || `opt-${idx + 1}`).trim() || `opt-${idx + 1}`,
+      text: String(option?.text || '').trim().slice(0, 120),
+      voters: Array.from(new Set((Array.isArray(option?.voters) ? option.voters : []).map((v) => String(v || '').trim()).filter(Boolean)))
+    }))
+    .filter((option) => option.text);
+
+  if (!question || normalizedOptions.length < 2) {
+    return res.status(400).json({ message: 'Invalid poll data' });
+  }
+
+  const targetIndex = normalizedOptions.findIndex((option) => String(option.id) === optionId);
+  if (targetIndex === -1) return res.status(404).json({ message: 'Poll option not found' });
+
+  const voterAliases = Array.from(new Set([String(auth.primary), ...(auth.ids || []).map(String)])).filter(Boolean);
+  const canonicalVoterId = String(auth.primary);
+
+  const alreadyVotedOption = normalizedOptions.find((option) => {
+    const voters = Array.isArray(option?.voters) ? option.voters.map(String) : [];
+    return voters.some((voter) => voterAliases.includes(String(voter)));
+  });
+
+  if (alreadyVotedOption) {
+    const alreadyOnSameOption = String(alreadyVotedOption.id) === optionId;
+    return res.status(409).json({
+      message: alreadyOnSameOption
+        ? 'You have already selected this option'
+        : 'You have already answered this poll',
+      optionId: String(alreadyVotedOption.id)
+    });
+  }
+
+  const nextOptions = normalizedOptions.map((option, index) => {
+    const voters = Array.from(new Set((Array.isArray(option.voters) ? option.voters : []).map(String).filter(Boolean)));
+    if (index !== targetIndex) {
+      return {
+        ...option,
+        voters
+      };
+    }
+
+    return {
+      ...option,
+      voters: Array.from(new Set([...voters, canonicalVoterId]))
+    };
+  });
+
+  const nextPoll = {
+    question,
+    options: nextOptions,
+    createdBy: String(pollRaw.createdBy || ''),
+    createdAt: String(pollRaw.createdAt || ''),
+    updatedAt: new Date().toISOString()
+  };
+
+  doc.meta = {
+    ...currentMeta,
+    poll: nextPoll
+  };
+  await doc.save();
+
+  // keep in-memory cache updated (best effort)
+  try {
+    const roomIdStr = String(doc.roomId || '');
+    const list = messages.get(roomIdStr) || [];
+    const idx = list.findIndex((item) => String(item?.id || '') === String(doc._id || ''));
+    if (idx !== -1) {
+      list[idx] = {
+        ...list[idx],
+        meta: {
+          ...(list[idx]?.meta || {}),
+          poll: nextPoll
+        }
+      };
+      messages.set(roomIdStr, list);
+    }
+  } catch (e) {}
+
+  // emit as a message-update event via existing channel so clients merge by id
+  try {
+    const io = req.app.get('io');
+    if (io) {
+      io.to(String(doc.roomId)).emit('room:message', {
+        id: doc._id.toString(),
+        roomId: String(doc.roomId),
+        senderId: String(doc.senderId),
+        senderName: String(doc.senderName || ''),
+        content: decryptMessageContent(doc.content),
+        type: doc.type,
+        attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
+        timestamp: doc.createdAt,
+        replyTo: doc.replyTo,
+        meta: doc.meta || {}
+      });
+    }
+  } catch (e) {}
+
+  res.json({ message: 'vote recorded', id: doc._id.toString(), poll: nextPoll });
 }));
 
 router.post('/messages/:id/reactions', asyncHandler(async (req, res) => {
