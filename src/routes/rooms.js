@@ -5,9 +5,12 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import Room from '../models/Room.js';
 import DMRoom from '../models/DMRoom.js';
 import RoomJoinRequest from '../models/RoomJoinRequest.js';
+import { getModelForRoom } from '../models/Message.js';
 import { users, upsertUserInMemory } from '../lib/userStore.js';
 import User from '../models/User.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
+import { encryptMessageContent } from '../lib/messageCrypto.js';
+import { pruneOldMessagesForRoom } from '../lib/messageRetention.js';
 import { redisDeleteByPrefix, redisGetJson, redisSetJson } from '../lib/redis.js';
 
 const router = Router();
@@ -22,6 +25,7 @@ const BOT_ENABLED = String(env.botEnabled || '').toLowerCase() !== 'false';
 const VIP_MEMBERS_ROOM_ID = String(env.vipMembersRoomId || 'room-1775384158848');
 const VIP_MEMBERS_ROOM_NAME = 'vip members 👑';
 const VIP_MEMBERS_ROOM_IDS = new Set([VIP_MEMBERS_ROOM_ID]);
+const ROOM_MESSAGE_RETENTION_LIMIT = 50;
 
 const parsePositiveInt = (value, fallback) => {
   const n = Number(value);
@@ -244,6 +248,87 @@ const getUserRecordForAnyIdentifier = async (id) => {
       .exec();
   } catch (e) {
     return null;
+  }
+};
+
+const resolveUserDisplayNameForSystem = async (rawId) => {
+  const id = String(rawId || '').trim();
+  if (!id) return 'Someone';
+
+  try {
+    const cached = users.get(id);
+    const cachedName = String(cached?.displayName || cached?.name || cached?.username || '').trim();
+    if (cachedName) return cachedName;
+  } catch (e) {
+    // ignore cache lookup failures
+  }
+
+  try {
+    const ors = [{ guestId: id }, { email: id }];
+    if (/^[0-9a-fA-F]{24}$/.test(id)) ors.unshift({ _id: id });
+    const doc = await User.findOne({ $or: ors })
+      .select('displayName name username')
+      .lean()
+      .exec();
+
+    const name = String(doc?.displayName || doc?.name || doc?.username || '').trim();
+    if (name) return name;
+  } catch (e) {
+    // ignore db lookup failures
+  }
+
+  return `User ${id.slice(-6) || id}`;
+};
+
+const emitRoomMembershipSystemMessage = async ({ roomId, roomDoc, targetUserId, action, io }) => {
+  const rid = String(roomId || '').trim();
+  if (!rid || !roomDoc) return;
+  if (isDmRoomDoc(roomDoc)) return;
+
+  const normalizedAction = String(action || '').trim().toLowerCase();
+  if (!['joined', 'left'].includes(normalizedAction)) return;
+
+  const displayName = await resolveUserDisplayNameForSystem(targetUserId);
+  const text = normalizedAction === 'joined'
+    ? `${displayName} joined`
+    : `${displayName} left`;
+
+  try {
+    const Model = getModelForRoom(roomDoc);
+    const systemDoc = new Model({
+      roomId: rid,
+      senderId: 'system',
+      senderName: 'System',
+      content: encryptMessageContent(text),
+      type: 'system',
+      meta: {
+        systemEvent: normalizedAction,
+        targetUserId: String(targetUserId || '')
+      }
+    });
+
+    await systemDoc.save();
+    void pruneOldMessagesForRoom({
+      Model,
+      roomId: rid,
+      keepLatest: ROOM_MESSAGE_RETENTION_LIMIT
+    });
+
+    if (io) {
+      io.to(rid).emit('room:message', {
+        id: systemDoc._id.toString(),
+        roomId: rid,
+        senderId: 'system',
+        senderName: 'System',
+        content: text,
+        type: 'system',
+        attachments: [],
+        timestamp: systemDoc.createdAt,
+        meta: systemDoc.meta || {}
+      });
+    }
+  } catch (e) {
+    // best-effort
   }
 };
 
@@ -1059,6 +1144,17 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
 
   const roomForBot = roomDoc || roomMem;
   const isVipRoom = isVipMembersRoom(roomForBot) || isVipMembersRoom(id);
+  const joinerId = String(userId || '').trim();
+  const expandedJoinerIds = await expandUserIdentifiers({ id: joinerId, email: null });
+  const joinerIds = uniqStrings([joinerId, ...(expandedJoinerIds || [])]);
+
+  const membersBeforeJoin = new Set([
+    ...((roomForBot?.members || []).map(String)),
+    ...((roomForBot?.participants || []).map(String)),
+    String(roomForBot?.owner || ''),
+    String(roomForBot?.createdBy || '')
+  ].filter(Boolean));
+  const wasAlreadyMember = joinerIds.some((rid) => membersBeforeJoin.has(String(rid)));
 
   // VIP room policy: only VIP users are allowed, and they can join directly (no request flow).
   if (isVipRoom) {
@@ -1075,10 +1171,6 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
 
   // Private (non-DM) rooms require owner/admin approval before join.
   if (isPrivateNonDmRoom(roomForBot) && !isVipRoom) {
-    const joinerId = String(userId || '').trim();
-    const expandedJoinerIds = await expandUserIdentifiers({ id: joinerId, email: null });
-    const joinerIds = uniqStrings([joinerId, ...(expandedJoinerIds || [])]);
-
     const roomMembers = new Set([
       ...((roomForBot.members || []).map(String)),
       ...((roomForBot.participants || []).map(String)),
@@ -1192,6 +1284,16 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
           io.to(id).emit('room:update', { id: fresh._id, ...fresh });
         }
 
+        if (!wasAlreadyMember) {
+          await emitRoomMembershipSystemMessage({
+            roomId: id,
+            roomDoc: fresh,
+            targetUserId: String(userId),
+            action: 'joined',
+            io
+          });
+        }
+
         return res.json({ id: fresh._id, ...fresh });
       }
     } catch (e) {
@@ -1208,6 +1310,25 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
     next.members = [...new Set([...(next.members || []), String(BOT_ID)])];
   }
   rooms.set(id, next);
+
+  const io = req.app.get('io');
+  if (io) {
+    try {
+      io.to(id).emit('room:member-joined', { roomId: id, userId: String(userId) });
+      io.to(id).emit('room:update', { id: next.id || id, ...next });
+    } catch (e) {}
+  }
+
+  if (!wasAlreadyMember) {
+    await emitRoomMembershipSystemMessage({
+      roomId: id,
+      roomDoc: next,
+      targetUserId: String(userId),
+      action: 'joined',
+      io
+    });
+  }
+
   res.json(next);
 }));
 
@@ -1552,6 +1673,18 @@ router.post('/:id/leave', asyncHandler(async (req, res) => {
   const roomMem = rooms.get(id) || null;
   if (!roomDoc && !roomMem) return res.status(404).json({ message: 'Room not found' });
 
+  const roomForLeave = roomDoc || roomMem;
+  const leaverId = String(userId || '').trim();
+  const expandedLeaverIds = await expandUserIdentifiers({ id: leaverId, email: null });
+  const leaverIds = uniqStrings([leaverId, ...(expandedLeaverIds || [])]);
+  const membersBeforeLeave = new Set([
+    ...((roomForLeave?.members || []).map(String)),
+    ...((roomForLeave?.participants || []).map(String)),
+    String(roomForLeave?.owner || ''),
+    String(roomForLeave?.createdBy || '')
+  ].filter(Boolean));
+  const wasMemberBeforeLeave = leaverIds.some((rid) => membersBeforeLeave.has(String(rid)));
+
   if (roomDoc && roomModel) {
     try {
       await roomModel.findByIdAndUpdate(
@@ -1572,6 +1705,16 @@ router.post('/:id/leave', asyncHandler(async (req, res) => {
           io.to(id).emit('room:member-kicked', { roomId: id, targetUserId: String(userId) });
         }
 
+        if (wasMemberBeforeLeave) {
+          await emitRoomMembershipSystemMessage({
+            roomId: id,
+            roomDoc: fresh,
+            targetUserId: String(userId),
+            action: 'left',
+            io
+          });
+        }
+
         return res.json({ id: fresh._id, ...fresh });
       }
     } catch (e) {
@@ -1584,6 +1727,26 @@ router.post('/:id/leave', asyncHandler(async (req, res) => {
   next.participants = (next.participants || []).map(String).filter(pid => pid !== String(userId));
   next.members = (next.members || []).map(String).filter(mid => mid !== String(userId));
   rooms.set(id, next);
+
+  const io = req.app.get('io');
+  if (io) {
+    try {
+      io.to(id).emit('room:member-left', { roomId: id, userId: String(userId) });
+      io.to(id).emit('room:update', { id: next.id || id, ...next });
+      io.to(id).emit('room:member-kicked', { roomId: id, targetUserId: String(userId) });
+    } catch (e) {}
+  }
+
+  if (wasMemberBeforeLeave) {
+    await emitRoomMembershipSystemMessage({
+      roomId: id,
+      roomDoc: next,
+      targetUserId: String(userId),
+      action: 'left',
+      io
+    });
+  }
+
   res.json(next);
 }));
 

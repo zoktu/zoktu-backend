@@ -670,6 +670,39 @@ const isVipUserRecord = (userDoc) => {
   );
 };
 
+const isRegisteredAndVerifiedUserRecord = (userDoc) => {
+  if (!userDoc || typeof userDoc !== 'object') return false;
+  const userType = String(userDoc.userType || '').toLowerCase();
+  const isRegistered = Boolean(userType && userType !== 'guest');
+  const isVerified = Boolean(userDoc.emailVerified === true);
+  return isRegistered && isVerified;
+};
+
+const getUserDocForIdentifiers = async (identifiers = [], fallbackEmail = '') => {
+  const normalized = new Set((identifiers || []).map((value) => String(value || '').trim()).filter(Boolean));
+  if (fallbackEmail) normalized.add(String(fallbackEmail).trim().toLowerCase());
+
+  const candidates = Array.from(normalized);
+  if (!candidates.length) return null;
+
+  const objectIds = candidates.filter((id) => looksLikeObjectId(id));
+  const emails = candidates.filter((id) => id.includes('@')).map((id) => String(id).toLowerCase());
+  const nonEmailIds = candidates.filter((id) => !id.includes('@'));
+
+  const ors = [
+    ...(objectIds.length ? [{ _id: { $in: objectIds } }] : []),
+    ...(nonEmailIds.length ? [{ guestId: { $in: nonEmailIds } }] : []),
+    ...(emails.length ? [{ email: { $in: emails } }] : [])
+  ];
+
+  if (!ors.length) return null;
+
+  return await User.findOne({ $or: ors })
+    .select('_id guestId userType emailVerified isAnonymous')
+    .lean()
+    .catch(() => null);
+};
+
 const sanitizePollMetaInput = (candidate, createdByFallback = '') => {
   if (!candidate || typeof candidate !== 'object') return null;
 
@@ -1304,6 +1337,18 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
 
   // Prevent spoofing senderId; if provided senderId isn't one of your equivalent ids, fall back to canonical id.
   const senderIdEffective = (senderId && auth.ids.includes(String(senderId))) ? String(senderId) : String(auth.primary);
+  const normalizedType = String(req.body?.type || 'text').toLowerCase();
+
+  if (normalizedType === 'poll') {
+    const senderDoc = await getUserDocForIdentifiers(
+      [senderIdEffective, ...(auth.ids || [])],
+      auth?.payload?.email
+    );
+
+    if (!isRegisteredAndVerifiedUserRecord(senderDoc)) {
+      return res.status(403).json({ message: 'Only registered and verified users can create polls' });
+    }
+  }
 
   const messageCharLimit = await getMessageCharLimitForIdentifiers([senderIdEffective, ...(auth.ids || [])]);
   const messageText = String(content || '');
@@ -1496,7 +1541,6 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
       .filter((a) => Boolean(a.url))
     : [];
 
-  const normalizedType = String(req.body?.type || 'text').toLowerCase();
   const safeMeta = sanitizeMessageMetaInput({
     rawMeta: req.body?.meta,
     messageType: normalizedType,
