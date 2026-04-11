@@ -16,6 +16,7 @@ import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
 import { containsProfanity, containsBlockedExternalLink } from '../middleware/profanityFilter.js';
 import { encryptMessageContent, decryptMessageContent } from '../lib/messageCrypto.js';
 import { pruneOldMessagesForRoom } from '../lib/messageRetention.js';
+import { isImageAttachment, moderateImageAttachment, deleteAttachmentAsset } from '../lib/imageModeration.js';
 
 const router = Router();
 export const messages = new Map();
@@ -1540,6 +1541,53 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
       }))
       .filter((a) => Boolean(a.url))
     : [];
+
+  const imageAttachments = safeAttachments.filter((attachment) => isImageAttachment(attachment));
+  if (imageAttachments.length) {
+    for (const attachment of imageAttachments) {
+      const moderation = await moderateImageAttachment({
+        attachment,
+        roomId: String(roomId),
+        senderId: String(senderIdEffective)
+      });
+
+      if (!moderation?.isSafe) {
+        const matchedCategories = Array.isArray(moderation?.matchedCategories)
+          ? moderation.matchedCategories
+          : [];
+        const labels = matchedCategories
+          .slice(0, 4)
+          .map((item) => String(item?.label || '').trim())
+          .filter(Boolean);
+        const labelSuffix = labels.length ? ` (${labels.join(', ')})` : '';
+        const reason = String(moderation?.reason || '').toLowerCase();
+        const isServiceIssue = reason.startsWith('service-') || reason === 'invalid-moderation-response';
+
+        if (!isServiceIssue) {
+          const cleanupTargets = Array.from(new Map(
+            imageAttachments
+              .map((item) => [String(item?.publicId || item?.url || '').trim(), item])
+              .filter(([key]) => Boolean(key))
+          ).values());
+
+          if (cleanupTargets.length) {
+            await Promise.allSettled(cleanupTargets.map((item) => deleteAttachmentAsset(item)));
+          }
+        }
+
+        return res.status(400).json({
+          message: isServiceIssue
+            ? 'Image blocked: safety service temporarily unavailable. Please retry.'
+            : `Image removed: unsafe content detected${labelSuffix}`,
+          code: isServiceIssue ? 'IMAGE_MODERATION_UNAVAILABLE' : 'IMAGE_MODERATION_BLOCKED',
+          details: {
+            action: 'auto-deleted',
+            categories: matchedCategories
+          }
+        });
+      }
+    }
+  }
 
   const safeMeta = sanitizeMessageMetaInput({
     rawMeta: req.body?.meta,

@@ -46,7 +46,14 @@ export const env = {
   ipIntelStrictness: process.env.IPINTEL_STRICTNESS || '1',
   ipIntelAllowPublicAccessPoints: process.env.IPINTEL_ALLOW_PUBLIC_ACCESS_POINTS || 'true',
   ipIntelFraudBlockScore: process.env.IPINTEL_FRAUD_BLOCK_SCORE || '85',
-  superAdminEmail: process.env.SUPER_ADMIN_EMAIL || 'rohitbansal23rk@gmail.com'
+  superAdminEmail: process.env.SUPER_ADMIN_EMAIL || 'rohitbansal23rk@gmail.com',
+  imageModerationEnabled: process.env.IMAGE_MODERATION_ENABLED || 'false',
+  imageModerationServiceUrl: process.env.IMAGE_MODERATION_SERVICE_URL || '',
+  imageModerationApiKey: process.env.IMAGE_MODERATION_API_KEY || '',
+  imageModerationTimeoutMs: process.env.IMAGE_MODERATION_TIMEOUT_MS || '4500',
+  imageModerationFailOpen: process.env.IMAGE_MODERATION_FAIL_OPEN || 'true',
+  imageModerationThreshold: process.env.IMAGE_MODERATION_THRESHOLD || '0.72',
+  imageModerationBlockedLabels: process.env.IMAGE_MODERATION_BLOCKED_LABELS || ''
 };
 
 // Backward-compatible aliases used in existing code.

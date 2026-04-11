@@ -40,4 +40,54 @@ services:
         sync: false
       - key: CLOUDINARY_API_SECRET
         sync: false
+      - key: IMAGE_MODERATION_ENABLED
+        value: true
+      - key: IMAGE_MODERATION_SERVICE_URL
+        sync: false
+      - key: IMAGE_MODERATION_API_KEY
+        sync: false
+      - key: IMAGE_MODERATION_TIMEOUT_MS
+        value: 4500
+      - key: IMAGE_MODERATION_FAIL_OPEN
+        value: false
+      - key: IMAGE_MODERATION_THRESHOLD
+        value: 0.72
+      - key: IMAGE_MODERATION_BLOCKED_LABELS
+        value: adult,nsfw,porn,hentai,nudity,sexual,sexy,violence,blood,gore,graphic,weapon,harassment,abuse,hate
     healthCheckPath: /api/health
+
+  - type: web
+    name: chitz-image-moderation
+    runtime: python
+    env: python
+    region: singapore
+    plan: free
+    rootDir: moderation-service
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: MODERATION_API_KEY
+        sync: false
+      - key: DEFAULT_THRESHOLD
+        value: 0.72
+      - key: BLOCKED_LABELS
+        value: adult,nsfw,porn,hentai,nudity,sexual,sexy,violence,blood,gore,graphic,weapon,harassment,abuse,hate
+      - key: REQUEST_TIMEOUT_SECONDS
+        value: 8
+      - key: MAX_IMAGE_MB
+        value: 12
+      - key: MAX_IMAGE_PIXELS
+        value: 16000000
+      - key: ENABLE_NSFW_MODEL
+        value: true
+      - key: ENABLE_ZERO_SHOT_MODEL
+        value: false
+      - key: NSFW_MODEL_ID
+        value: Falconsai/nsfw_image_detection
+      - key: ZERO_SHOT_MODEL_ID
+        value: openai/clip-vit-base-patch32
+      - key: HF_DEVICE
+        value: -1
+    healthCheckPath: /health
