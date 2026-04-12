@@ -1357,6 +1357,21 @@ router.post('/rooms/:roomId/messages/mark-read', asyncHandler(async (req, res) =
 
   const result = await Model.updateMany(query, updates).exec();
 
+  // Emit instant read receipt to the room so the sender sees ✓✓ right away
+  try {
+    const io = req.app.get('io');
+    if (io && (result?.modifiedCount ?? result?.nModified ?? 0) > 0) {
+      io.to(String(roomId)).emit('dm:messages:read', {
+        roomId: String(roomId),
+        readByUserId: String(auth.primary),
+        readByIds: selfIds,
+        messageIds: messageIds.length ? messageIds : []
+      });
+    }
+  } catch (e) {
+    // best-effort socket broadcast
+  }
+
   res.json({ message: 'ok', updated: result?.modifiedCount ?? result?.nModified ?? 0 });
 }));
 
