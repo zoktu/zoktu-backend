@@ -24,6 +24,7 @@ import {
   updateRoomDocByIdWithCache as updateRoomDocById
 } from './lib/roomCache.js';
 import { encryptMessageContent, decryptMessageContent } from './lib/messageCrypto.js';
+import { startUserCleanupJob } from './lib/userCleanup.js';
 
 const app = express();
 // Trust the first proxy (Render) so rate limiting uses correct client IP instead of Render's proxy IP
@@ -767,6 +768,8 @@ const start = async () => {
   }
   httpServer.listen(env.port, () => {
     console.log(`🚀 Backend running on http://localhost:${env.port}`);
+    // Start automated background tasks
+    startUserCleanupJob();
   });
 };
 

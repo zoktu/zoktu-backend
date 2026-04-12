@@ -53,7 +53,8 @@ export const env = {
   imageModerationTimeoutMs: process.env.IMAGE_MODERATION_TIMEOUT_MS || '4500',
   imageModerationFailOpen: process.env.IMAGE_MODERATION_FAIL_OPEN || 'true',
   imageModerationThreshold: process.env.IMAGE_MODERATION_THRESHOLD || '0.72',
-  imageModerationBlockedLabels: process.env.IMAGE_MODERATION_BLOCKED_LABELS || ''
+  imageModerationBlockedLabels: process.env.IMAGE_MODERATION_BLOCKED_LABELS || '',
+  inactiveUserDeleteMonths: process.env.INACTIVE_USER_DELETE_MONTHS || '6'
 };
 
 // Backward-compatible aliases used in existing code.
