@@ -87,7 +87,7 @@ export async function seedUsersFromDb() {
   }
   const docs = await User.find({}).lean().exec();
   docs.forEach((doc) => {
-    upsertUserInMemory({ ...doc, isOnline: false, id: String(doc._id) });
+    upsertUserInMemory({ ...doc, isOnline: false, id: String(doc.guestId || doc._id) });
   });
 }
 

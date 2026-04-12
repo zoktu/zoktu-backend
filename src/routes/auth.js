@@ -973,7 +973,13 @@ router.get('/me', asyncHandler(async (req, res) => {
     }
     if (!doc && payload?.id) {
       const id = String(payload.id);
-      doc = await User.findOne({ $or: [{ _id: id }, { guestId: id }] }).lean().exec().catch(() => null);
+      const isObjectId = /^[a-f\d]{24}$/i.test(id);
+      doc = await User.findOne({ 
+        $or: [
+          ...(isObjectId ? [{ _id: id }] : []), 
+          { guestId: id }
+        ] 
+      }).lean().exec().catch(() => null);
     }
     if (doc) {
       user = upsertUserInMemory({ ...doc, id: String(doc.guestId || doc._id) });

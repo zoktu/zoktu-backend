@@ -404,19 +404,35 @@ io.on('connection', (socket) => {
   }
 
   // Allow clients (REST-created rooms/DMs) to join a room for realtime events
-  socket.on('room:join', (data) => {
+  socket.on('room:join', async (data) => {
     try {
       const roomId = data?.roomId ? String(data.roomId) : null;
       if (!roomId) return;
       socket.join(roomId);
+
+      // If this is a DM room, tell the partner the user is now active in chat
+      if (effectiveUserId) {
+        const dmDoc = await DMRoom.findById(roomId).lean().catch(() => null);
+        if (dmDoc) {
+          io.to(roomId).emit('dm:user:active', { roomId, userId: effectiveUserId });
+        }
+      }
     } catch (e) {}
   });
 
-  socket.on('room:leave', (data) => {
+  socket.on('room:leave', async (data) => {
     try {
       const roomId = data?.roomId ? String(data.roomId) : null;
       if (!roomId) return;
       socket.leave(roomId);
+
+      // If DM room, tell the partner the user is no longer active in chat
+      if (effectiveUserId) {
+        const dmDoc = await DMRoom.findById(roomId).lean().catch(() => null);
+        if (dmDoc) {
+          io.to(roomId).emit('dm:user:inactive', { roomId, userId: effectiveUserId });
+        }
+      }
     } catch (e) {}
   });
 
