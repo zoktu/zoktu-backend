@@ -12,6 +12,7 @@ import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
 import { encryptMessageContent } from '../lib/messageCrypto.js';
 import { pruneOldMessagesForRoom } from '../lib/messageRetention.js';
 import { redisDeleteByPrefix, redisGetJson, redisSetJson } from '../lib/redis.js';
+import { moderateImageAttachment, isImageAttachment } from '../lib/imageModeration.js';
 
 const router = Router();
 const rooms = new Map();
@@ -808,6 +809,22 @@ router.post('/', asyncHandler(async (req, res) => {
   }
 
   room.settings = normalizedSettings;
+
+  // AI Moderation for Room Logo
+  const roomLogo = String(room.image || room.settings?.groupIcon || '').trim();
+  if (roomLogo && !isDmRoom) {
+    try {
+      const moderation = await moderateImageAttachment({ 
+        attachment: { url: roomLogo },
+        senderId: ownerId 
+      });
+      if (moderation.checked && !moderation.isSafe) {
+        return res.status(400).json({ message: 'Group logo contains disallowed content' });
+      }
+    } catch (e) {
+      console.warn('AI Moderation failed for room logo', e?.message || e);
+    }
+  }
 
   // persist to DB
   try {
@@ -1804,6 +1821,33 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     // merge settings if provided
     if (setObj.settings && roomDoc.settings) {
       setObj.settings = { ...(roomDoc.settings || {}), ...(setObj.settings || {}) };
+    }
+
+    // AI Moderation for Room Settings (Logo & Wallpaper)
+    if (setObj.settings && !isDmRoomDoc(roomDoc)) {
+      const mediaToScan = [];
+      
+      const newLogo = String(setObj.settings.groupIcon || '').trim();
+      const oldLogo = String(roomDoc.settings?.groupIcon || '').trim();
+      if (newLogo && newLogo !== oldLogo) mediaToScan.push({ url: newLogo, label: 'logo' });
+
+      const newWall = String(setObj.settings.groupWallpaper || '').trim();
+      const oldWall = String(roomDoc.settings?.groupWallpaper || '').trim();
+      if (newWall && newWall !== oldWall) mediaToScan.push({ url: newWall, label: 'wallpaper' });
+
+      for (const item of mediaToScan) {
+        try {
+          const moderation = await moderateImageAttachment({ 
+            attachment: { url: item.url },
+            senderId: String(requesterCanonical || payload?.id)
+          });
+          if (moderation.checked && !moderation.isSafe) {
+            return res.status(400).json({ message: `Group ${item.label} contains disallowed content` });
+          }
+        } catch (e) {
+          console.warn(`AI Moderation failed for room ${item.label}`, e?.message || e);
+        }
+      }
     }
 
     // Keep description and settings.groupDescription in sync for non-DM rooms.

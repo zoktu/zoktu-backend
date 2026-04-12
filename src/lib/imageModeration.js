@@ -262,9 +262,12 @@ const evaluateModerationPayload = (payload, threshold, blockedLabels) => {
   };
 };
 
-const moderateWithHuggingFace = async ({ imageUrl }) => {
+const moderateWithHuggingFace = async ({ imageUrl, threshold = 0.72 }) => {
   const apiKey = String(env.huggingFaceApiKey || '').trim();
   if (!apiKey) return null;
+
+  const maxRetries = 3;
+  let attempt = 0;
 
   try {
     // 1. Fetch image as buffer
@@ -272,33 +275,53 @@ const moderateWithHuggingFace = async ({ imageUrl }) => {
     if (!imgRes.ok) return null;
     const buffer = await imgRes.arrayBuffer();
 
-    // 2. Call Hugging Face Inference API
-    const hfResponse = await fetch(
-      'https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection',
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/octet-stream'
-        },
-        body: buffer
+    while (attempt < maxRetries) {
+      attempt++;
+      // 2. Call Hugging Face Inference API
+      const hfResponse = await fetch(
+        'https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/octet-stream'
+          },
+          body: buffer
+        }
+      );
+
+      const result = await hfResponse.json();
+
+      // Handle model loading state
+      if (hfResponse.status === 503 || (result?.error && String(result.error).includes('loading'))) {
+        const waitTime = Math.min(Number(result?.estimated_time || 5) * 1000, 10000);
+        console.log(`[AI-Moderation] Model loading, waiting ${waitTime/1000}s... (Attempt ${attempt}/${maxRetries})`);
+        await new Promise(r => setTimeout(r, waitTime));
+        continue;
       }
-    );
 
-    if (!hfResponse.ok) return null;
-    const result = await hfResponse.json();
+      if (!hfResponse.ok) {
+        console.error(`[AI-Moderation] HF API Error (${hfResponse.status}):`, result?.error || 'Unknown error');
+        return null;
+      }
 
-    if (!Array.isArray(result)) return null;
+      if (!Array.isArray(result)) return null;
 
-    // Hugging Face returns labels like 'nsfw' and 'normal'
-    const nsfwEntry = result.find(item => String(item.label || '').toLowerCase() === 'nsfw');
-    const nsfwScore = nsfwEntry ? nsfwEntry.score : 0;
+      // Hugging Face returns labels like 'nsfw' and 'normal'
+      const nsfwEntry = result.find(item => String(item.label || '').toLowerCase() === 'nsfw');
+      const nsfwScore = nsfwEntry ? nsfwEntry.score : 0;
 
-    return {
-      hasSignal: true,
-      isSafe: nsfwScore < 0.7, // Threshold
-      matchedCategories: nsfwScore >= 0.7 ? [{ label: 'nsfw', score: nsfwScore }] : []
-    };
+      const isSafe = nsfwScore < threshold;
+
+      console.log(`[AI-Moderation] HF Scan Result - URL: ${imageUrl.slice(-30)}, NSFW Score: ${nsfwScore.toFixed(3)}, Threshold: ${threshold}, IsSafe: ${isSafe}`);
+
+      return {
+        hasSignal: true,
+        isSafe,
+        matchedCategories: isSafe ? [] : [{ label: 'nsfw', score: nsfwScore }]
+      };
+    }
+    return null; // All retries failed
   } catch (error) {
     console.error('Hugging Face Moderation Error:', error);
     return null;
@@ -333,7 +356,7 @@ export const moderateImageAttachment = async ({ attachment, roomId, senderId } =
 
   // If no external service URL, try Hugging Face
   if (!serviceUrl) {
-    const hfEvaluation = await moderateWithHuggingFace({ imageUrl });
+    const hfEvaluation = await moderateWithHuggingFace({ imageUrl, threshold });
     if (hfEvaluation && hfEvaluation.hasSignal) {
       return {
         checked: true,
@@ -342,6 +365,8 @@ export const moderateImageAttachment = async ({ attachment, roomId, senderId } =
         matchedCategories: hfEvaluation.matchedCategories || []
       };
     }
+
+    console.warn('[AI-Moderation] HF Moderation failed or returned no signal for:', imageUrl.slice(-30));
 
     return {
       checked: false,

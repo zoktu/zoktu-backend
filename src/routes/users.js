@@ -8,6 +8,7 @@ import Room from '../models/Room.js';
 import DMRoom from '../models/DMRoom.js';
 import { containsProfanity } from '../middleware/profanityFilter.js';
 import { redisGetJson, redisSetJson } from '../lib/redis.js';
+import { moderateImageAttachment } from '../lib/imageModeration.js';
 
 const router = Router();
 
@@ -1152,6 +1153,26 @@ router.patch('/:id', asyncHandler(async (req, res) => {
     }
   } catch (e) {
     // fail-open on detection errors
+  }
+
+  // AI Moderation for Profile Picture
+  const newAvatar = String(safeBody.avatar || safeBody.photoURL || '').trim();
+  if (newAvatar) {
+    const existingAvatar = String(existing?.avatar || existing?.photoURL || '').trim();
+    if (newAvatar !== existingAvatar && !newAvatar.startsWith('/avatars/default-')) {
+      try {
+        const moderation = await moderateImageAttachment({ 
+          attachment: { url: newAvatar },
+          senderId: userIdParam 
+        });
+        if (moderation.checked && !moderation.isSafe) {
+          return res.status(400).json({ message: 'Profile picture contains disallowed content' });
+        }
+      } catch (e) {
+        console.warn('AI Moderation failed for PFP', e?.message || e);
+        // fail-open
+      }
+    }
   }
 
   // Enforce bio length server-side to match frontend (1000 chars)
