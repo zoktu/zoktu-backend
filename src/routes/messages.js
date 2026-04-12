@@ -20,6 +20,22 @@ import { isImageAttachment, moderateImageAttachment, deleteAttachmentAsset } fro
 
 const router = Router();
 export const messages = new Map();
+
+// Helper to identify DM rooms
+const isDmRoomDoc = (doc) => Boolean(
+  doc && (
+    doc.type === 'dm' ||
+    doc.category === 'dm' ||
+    (doc.type === 'private' && doc.category === 'dm')
+  )
+);
+
+const canonicalFriendKeyForUserDoc = (doc, fallbackId) => {
+  if (doc && doc.userType === 'guest' && doc.guestId) return String(doc.guestId);
+  if (doc && doc._id) return String(doc._id);
+  return fallbackId ? String(fallbackId) : null;
+};
+
 // Simple in-memory throttle per IP+room to avoid abusive polling
 const lastMessageRequest = new Map(); // key: `${ip}:${roomId}` -> timestamp
 const MIN_INTERVAL_MS = 800; // minimum allowed interval between requests per IP+room (production)
@@ -902,9 +918,8 @@ const createNotificationsForMessage = async ({ roomDoc, doc, senderIdEffective, 
       sendWebPushNotifications({ notifications: writes }).catch(() => {
         // best-effort
       });
-    }
-  } catch (e) {
-    // best-effort
+    } catch (e) {
+    console.error('[NotificationError] Failed to create notifications:', e);
   }
 };
 
@@ -921,20 +936,6 @@ const normalizeReceiptIds = (auth) => {
   } catch (e) {
     return [];
   }
-};
-
-const isDmRoomDoc = (doc) => Boolean(
-  doc && (
-    doc.type === 'dm' ||
-    doc.category === 'dm' ||
-    (doc.type === 'private' && doc.category === 'dm')
-  )
-);
-
-const canonicalFriendKeyForUserDoc = (doc, fallbackId) => {
-  if (doc && doc.userType === 'guest' && doc.guestId) return String(doc.guestId);
-  if (doc && doc._id) return String(doc._id);
-  return fallbackId ? String(fallbackId) : null;
 };
 
 const areUsersFriends = async (aId, bId) => {

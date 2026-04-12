@@ -361,6 +361,9 @@ io.on('connection', (socket) => {
   const userId = socket.handshake.query?.userId || socket.handshake.auth?.userId || null;
   const effectiveUserId = userId ? String(userId) : null;
   if (effectiveUserId) {
+    socket.userId = effectiveUserId;
+    socket.join(`user:${effectiveUserId}`);
+    
     // Check if user or IP is globally banned
     const ip = String(socket.handshake.address || socket.request?.socket?.remoteAddress || '')
       .split(',')[0]
@@ -393,8 +396,6 @@ io.on('connection', (socket) => {
         return;
       }
       
-      socket.userId = effectiveUserId;
-      socket.join(`user:${effectiveUserId}`);
       socketsByUser.set(effectiveUserId, socket);
       socketCountByUser.set(effectiveUserId, (socketCountByUser.get(effectiveUserId) || 0) + 1);
       markUserPresence(effectiveUserId, true);
