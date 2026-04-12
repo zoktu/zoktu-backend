@@ -812,7 +812,7 @@ const findMentionTargets = async (roomDoc, mentionTokens) => {
   })).filter((d) => d.id);
 };
 
-const createNotificationsForMessage = async ({ roomDoc, doc, senderIdEffective, senderName, content, replyTo, auth }) => {
+const createNotificationsForMessage = async ({ roomDoc, doc, senderIdEffective, senderName, content, replyTo, auth, req }) => {
   try {
     const senderIds = new Set((auth?.ids || []).map(String));
     senderIds.add(String(senderIdEffective));
@@ -884,8 +884,19 @@ const createNotificationsForMessage = async ({ roomDoc, doc, senderIdEffective, 
       });
     }
 
-    if (writes.length) {
       await Notification.insertMany(writes);
+      
+      // Emit socket notification to recipients who are online but not in the room
+      if (io) {
+        for (const w of writes) {
+          try {
+            io.to(`user:${w.userId}`).emit('notification:new', {
+              ...w,
+              message: decryptMessageContent(w.message)
+            });
+          } catch (err) {}
+        }
+      }
 
       // Fire-and-forget: push delivery should not block message send path.
       sendWebPushNotifications({ notifications: writes }).catch(() => {
@@ -1668,7 +1679,8 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
     senderName: req.body?.senderName || '',
     content: contentForStorage,
     replyTo,
-    auth
+    auth,
+    req
   });
 
 
