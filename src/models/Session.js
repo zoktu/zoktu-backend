@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { env } from '../config/env.js';
 
 const SessionSchema = new mongoose.Schema({
   sessionId: { type: String, required: true, unique: true, index: true },
@@ -14,7 +15,7 @@ const SessionSchema = new mongoose.Schema({
   riskScore: { type: Number, required: false },
   riskReason: { type: String, required: false },
   createdAt: { type: Date, default: () => new Date() },
-  lastActive: { type: Date, default: () => new Date() }
+  lastActive: { type: Date, default: () => new Date(), index: { expires: (env.sessionTtlDays || 30) * 24 * 60 * 60 } }
 });
 
 const Session = mongoose.models.Session || mongoose.model('Session', SessionSchema);

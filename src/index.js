@@ -23,6 +23,7 @@ import {
   getRoomDocByIdWithCache as getRoomDocById,
   updateRoomDocByIdWithCache as updateRoomDocById
 } from './lib/roomCache.js';
+import { encryptMessageContent, decryptMessageContent } from './lib/messageCrypto.js';
 
 const app = express();
 // Trust the first proxy (Render) so rate limiting uses correct client IP instead of Render's proxy IP
@@ -455,10 +456,36 @@ io.on('connection', (socket) => {
 
     // Notify other participants in any rooms this socket was in that partner left
     try {
+      const roomsToClean = [];
       for (const roomId of socket.rooms) {
         if (roomId === socket.id) continue;
+        
+        // Detect random chat rooms (prefixed with dm- and usually handled as random)
+        if (String(roomId).startsWith('dm-')) {
+          roomsToClean.push(String(roomId));
+        }
+
         // emit to remaining members
         socket.to(roomId).emit('room:partner-left', { roomId, userId: effectiveUserId || userId });
+      }
+
+      // Perform cleanup for random chat segments
+      if (roomsToClean.length > 0) {
+        (async () => {
+          try {
+            const { RandomMessage } = await import('./models/Message.js');
+            for (const rid of roomsToClean) {
+              const roomDoc = await getRoomDocById(rid);
+              if (roomDoc && roomDoc.category === 'random') {
+                console.log(`[Cleanup] Deleting messages and room metadata for random chat: ${rid}`);
+                await RandomMessage.deleteMany({ roomId: rid }).exec();
+                await DMRoom.deleteOne({ _id: rid }).exec();
+              }
+            }
+          } catch (e) {
+            console.warn('[Cleanup] Random chat cleanup failed:', e?.message || e);
+          }
+        })();
       }
     } catch (e) {}
   });
@@ -615,7 +642,13 @@ io.on('connection', (socket) => {
           const isRandom = roomDoc && roomDoc.category === 'random';
           const nameForDb = senderName || '';
           
-          const doc = new Model({ roomId, senderId: senderIdEffective, senderName: nameForDb, content: contentText, type: 'text' });
+          const doc = new Model({ 
+            roomId, 
+            senderId: senderIdEffective, 
+            senderName: nameForDb, 
+            content: isRandom ? encryptMessageContent(contentText) : contentText, 
+            type: 'text' 
+          });
           await doc.save();
           void pruneOldMessagesForRoom({
             Model,
@@ -628,7 +661,7 @@ io.on('connection', (socket) => {
             roomId, 
             senderId: senderIdEffective, 
             senderName: isRandom ? 'Stranger' : (doc.senderName || senderId || 'User'), 
-            content: doc.content, 
+            content: isRandom ? decryptMessageContent(doc.content) : doc.content, 
             timestamp: doc.createdAt.toISOString() 
           };
           

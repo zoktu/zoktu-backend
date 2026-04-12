@@ -520,6 +520,11 @@ router.get('/', asyncHandler(async (req, res) => {
         ]
       });
     }
+    
+    // Always exclude random chat rooms from the main discoverable or joined lists.
+    // Random chats are transient and handled separately via the random chat interface.
+    and.push({ category: { $ne: 'random' } });
+
     if (member) {
       const m = String(member);
 
