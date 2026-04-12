@@ -1196,8 +1196,16 @@ router.get('/rooms/:roomId/messages', (req, res) => {
       const mapped = docs.reverse().map(d => {
         const meta = d.meta || {};
         let viewedEntry = null;
-        if (currentUserIds.length && Array.isArray(meta.viewed)) {
-          viewedEntry = meta.viewed.find(v => currentUserIds.includes(String(v.userId))) || null;
+        if (currentUserIds.length) {
+          if (Array.isArray(meta.viewed)) {
+            viewedEntry = meta.viewed.find(v => currentUserIds.includes(String(v.userId))) || null;
+          }
+          if (!viewedEntry && Array.isArray(meta.viewerIds)) {
+            viewedEntry = meta.viewerIds.find(v => currentUserIds.includes(String(v))) ? true : null;
+          }
+          if (!viewedEntry && Array.isArray(meta.readBy)) {
+            viewedEntry = meta.readBy.find(v => currentUserIds.includes(String(v))) ? true : null;
+          }
         }
         return ({
           id: d._id.toString(),
@@ -1304,22 +1312,20 @@ router.post('/rooms/:roomId/messages/mark-read', asyncHandler(async (req, res) =
   const roomDoc = await getRoomDocById(roomId);
   if (!isDmRoomDoc(roomDoc)) return res.status(400).json({ message: 'Receipts supported only for DMs' });
 
-  // Respect user setting to not send read receipts.
+  let allowReadReceipts = true;
   try {
     const me = await User.findOne({ $or: [{ _id: String(auth.primary) }, { guestId: String(auth.primary) }] })
       .select('settings')
       .lean()
       .catch(() => null);
     if (me?.settings?.showReadReceipts === false) {
-      return res.json({ message: 'disabled', updated: 0 });
+      allowReadReceipts = false;
     }
   } catch (e) {
     // best-effort
   }
 
   const receiptIds = normalizeReceiptIds(auth);
-  if (!receiptIds.length) return res.json({ message: 'ok', updated: 0 });
-
   const messageIdsRaw = Array.isArray(req.body?.messageIds) ? req.body.messageIds : [];
   const messageIds = messageIdsRaw.map(String).filter(Boolean).slice(0, 200);
 
@@ -1332,10 +1338,24 @@ router.post('/rooms/:roomId/messages/mark-read', asyncHandler(async (req, res) =
     ...(messageIds.length ? { _id: { $in: messageIds } } : {})
   };
 
-  const result = await Model.updateMany(
-    query,
-    { $addToSet: { 'meta.readBy': { $each: receiptIds } } }
-  ).exec();
+  const updates = {};
+  const setAdditions = {};
+
+  if (selfIds.length) {
+    setAdditions['meta.viewerIds'] = { $each: selfIds };
+  }
+
+  if (allowReadReceipts && receiptIds.length) {
+    setAdditions['meta.readBy'] = { $each: receiptIds };
+  }
+
+  if (Object.keys(setAdditions).length > 0) {
+    updates.$addToSet = setAdditions;
+  } else {
+    return res.json({ message: 'ok', updated: 0 });
+  }
+
+  const result = await Model.updateMany(query, updates).exec();
 
   res.json({ message: 'ok', updated: result?.modifiedCount ?? result?.nModified ?? 0 });
 }));
