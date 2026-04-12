@@ -270,10 +270,31 @@ const moderateWithHuggingFace = async ({ imageUrl, threshold = 0.72 }) => {
   let attempt = 0;
 
   try {
-    // 1. Fetch image as buffer
-    const imgRes = await fetch(imageUrl);
-    if (!imgRes.ok) return null;
-    const buffer = await imgRes.arrayBuffer();
+    // 1. Fetch image as buffer (with retry for Cloudinary latency)
+    let buffer = null;
+    let fetchAttempt = 0;
+    while (fetchAttempt < 3) {
+      fetchAttempt++;
+      try {
+        const imgRes = await fetch(imageUrl);
+        if (imgRes.ok) {
+          buffer = await imgRes.arrayBuffer();
+          break;
+        }
+        console.warn(`[AI-Moderation] Image fetch attempt ${fetchAttempt} failed (Status: ${imgRes.status}) for: ${imageUrl.slice(-30)}`);
+      } catch (e) {
+        console.warn(`[AI-Moderation] Image fetch attempt ${fetchAttempt} error:`, e.message);
+      }
+      
+      if (fetchAttempt < 3) {
+        await new Promise(r => setTimeout(r, 1500)); // Wait 1.5s for Cloudinary propagation
+      }
+    }
+
+    if (!buffer) {
+      console.error('[AI-Moderation] Failed to fetch image buffer after multiple attempts:', imageUrl.slice(-30));
+      return null;
+    }
 
     while (attempt < maxRetries) {
       attempt++;
