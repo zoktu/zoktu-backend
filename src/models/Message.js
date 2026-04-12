@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { env } from '../config/env.js';
 
 const MessageSchema = new mongoose.Schema({
   roomId: { type: String, required: true, index: true },
@@ -8,7 +9,7 @@ const MessageSchema = new mongoose.Schema({
   type: { type: String, default: 'text' },
   replyTo: { type: String },
   attachments: [{ url: String, fileName: String, fileSize: Number, mimeType: String, publicId: String }],
-  createdAt: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now, index: { expires: (env.messageTtlDays || 5) * 24 * 60 * 60 } },
   editedAt: { type: Date },
   reactions: [{ emoji: String, userId: String, createdAt: Date }],
   meta: { type: Object }

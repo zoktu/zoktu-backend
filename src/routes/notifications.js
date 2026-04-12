@@ -209,6 +209,18 @@ router.post('/mark-all-read', asyncHandler(async (req, res) => {
   res.json({ message: 'ok', updated: result?.modifiedCount ?? result?.nModified ?? 0 });
 }));
 
+router.get('/unread-count', asyncHandler(async (req, res) => {
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const count = await Notification.countDocuments({
+    userId: { $in: auth.ids },
+    read: false
+  }).exec().catch(() => 0);
+
+  res.json({ count });
+}));
+
 router.delete('/:id', asyncHandler(async (req, res) => {
   const auth = await getAuthIdentity(req);
   if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });

@@ -262,11 +262,54 @@ const evaluateModerationPayload = (payload, threshold, blockedLabels) => {
   };
 };
 
+const moderateWithHuggingFace = async ({ imageUrl }) => {
+  const apiKey = String(env.huggingFaceApiKey || '').trim();
+  if (!apiKey) return null;
+
+  try {
+    // 1. Fetch image as buffer
+    const imgRes = await fetch(imageUrl);
+    if (!imgRes.ok) return null;
+    const buffer = await imgRes.arrayBuffer();
+
+    // 2. Call Hugging Face Inference API
+    const hfResponse = await fetch(
+      'https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/octet-stream'
+        },
+        body: buffer
+      }
+    );
+
+    if (!hfResponse.ok) return null;
+    const result = await hfResponse.json();
+
+    if (!Array.isArray(result)) return null;
+
+    // Hugging Face returns labels like 'nsfw' and 'normal'
+    const nsfwEntry = result.find(item => String(item.label || '').toLowerCase() === 'nsfw');
+    const nsfwScore = nsfwEntry ? nsfwEntry.score : 0;
+
+    return {
+      hasSignal: true,
+      isSafe: nsfwScore < 0.7, // Threshold
+      matchedCategories: nsfwScore >= 0.7 ? [{ label: 'nsfw', score: nsfwScore }] : []
+    };
+  } catch (error) {
+    console.error('Hugging Face Moderation Error:', error);
+    return null;
+  }
+};
+
 export const moderateImageAttachment = async ({ attachment, roomId, senderId } = {}) => {
   const isEnabled = parseBoolean(env.imageModerationEnabled, false);
   const serviceUrl = String(env.imageModerationServiceUrl || '').trim();
 
-  if (!isEnabled || !serviceUrl) {
+  if (!isEnabled) {
     return {
       checked: false,
       isSafe: true,
@@ -287,6 +330,25 @@ export const moderateImageAttachment = async ({ attachment, roomId, senderId } =
   const timeoutMs = clamp(Math.round(parseNumber(env.imageModerationTimeoutMs, 4500)), 800, 30000);
   const failOpen = parseBoolean(env.imageModerationFailOpen, true);
   const blockedLabels = getBlockedLabels();
+
+  // If no external service URL, try Hugging Face
+  if (!serviceUrl) {
+    const hfEvaluation = await moderateWithHuggingFace({ imageUrl });
+    if (hfEvaluation && hfEvaluation.hasSignal) {
+      return {
+        checked: true,
+        isSafe: Boolean(hfEvaluation.isSafe),
+        reason: hfEvaluation.isSafe ? 'safe' : 'unsafe',
+        matchedCategories: hfEvaluation.matchedCategories || []
+      };
+    }
+
+    return {
+      checked: false,
+      isSafe: true,
+      reason: 'no-service-url-and-hf-failed'
+    };
+  }
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => {

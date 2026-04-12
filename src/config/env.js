@@ -84,8 +84,10 @@ env.usersBatchLocalCacheMaxEntries = process.env.USERS_BATCH_LOCAL_CACHE_MAX_ENT
 env.messageRetentionLimit = process.env.MESSAGE_RETENTION_LIMIT || '50';
 env.messagePruneBatchSize = process.env.MESSAGE_PRUNE_BATCH_SIZE || '500';
 env.messagePruneMinIntervalMs = process.env.MESSAGE_PRUNE_MIN_INTERVAL_MS || '5000';
-env.sessionTtlDays = Number(process.env.SESSION_TTL_DAYS || '30');
-env.notificationTtlDays = Number(process.env.NOTIFICATION_TTL_DAYS || '60');
+env.sessionTtlDays = Number(process.env.SESSION_TTL_DAYS || '10');
+env.notificationTtlDays = Number(process.env.NOTIFICATION_TTL_DAYS || '5');
+env.messageTtlDays = Number(process.env.MESSAGE_TTL_DAYS || '5');
+env.randomMessageTtlDays = Number(process.env.RANDOM_MESSAGE_TTL_DAYS || '1');
 
 // Prerender service (optional) - e.g., https://service.prerender.io
 env.prerenderServiceUrl = process.env.PRERENDER_SERVICE_URL || '';

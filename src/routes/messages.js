@@ -845,13 +845,26 @@ const createNotificationsForMessage = async ({ roomDoc, doc, senderIdEffective, 
       }
     }
 
-    if (!targets.size) return;
-
     const trimmed = String(content || '').trim();
     const preview = trimmed ? trimmed.slice(0, 140) : 'New message';
 
+    const io = req.app.get('io');
+    const inRoomUserIds = new Set();
+    if (io) {
+      try {
+        const sockets = await io.in(String(doc.roomId)).fetchSockets();
+        for (const s of sockets) {
+          if (s.userId) inRoomUserIds.add(String(s.userId));
+        }
+      } catch (e) {
+        // fail-open: if socket fetch fails, we continue with ordinary notifications
+      }
+    }
+
     const writes = [];
     for (const [targetId, info] of targets.entries()) {
+      if (inRoomUserIds.has(String(targetId))) continue;
+
       const type = info?.type || 'system';
       const title = type === 'dm'
         ? `New DM from ${senderName || 'User'}`

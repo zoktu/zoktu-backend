@@ -17,6 +17,7 @@ const router = Router();
 const rooms = new Map();
 // Simple in-memory waiting queue for random chat pairing
 const waitingQueue = [];
+const processingJoins = new Set();
 
 const BOT_ID = env.botId || 'bot-baka';
 const BOT_NAME = env.botName || 'Baka';
@@ -1150,7 +1151,12 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
   const roomForBot = roomDoc || roomMem;
   const isVipRoom = isVipMembersRoom(roomForBot) || isVipMembersRoom(id);
   const joinerId = String(userId || '').trim();
-  const expandedJoinerIds = await expandUserIdentifiers({ id: joinerId, email: null });
+  const lockKey = `${joinerId}:${id}`;
+  if (processingJoins.has(lockKey)) return res.status(429).json({ message: 'Join already in progress' });
+  processingJoins.add(lockKey);
+
+  try {
+    const expandedJoinerIds = await expandUserIdentifiers({ id: joinerId, email: null });
   const joinerIds = uniqStrings([joinerId, ...(expandedJoinerIds || [])]);
 
   const membersBeforeJoin = new Set([
@@ -1335,6 +1341,9 @@ router.post('/:id/join', asyncHandler(async (req, res) => {
   }
 
   res.json(next);
+  } finally {
+    processingJoins.delete(lockKey);
+  }
 }));
 
 // Allow room creator/owner to delete a room (permanent removal)

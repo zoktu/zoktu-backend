@@ -392,6 +392,7 @@ io.on('connection', (socket) => {
         return;
       }
       
+      socket.userId = effectiveUserId;
       socketsByUser.set(effectiveUserId, socket);
       socketCountByUser.set(effectiveUserId, (socketCountByUser.get(effectiveUserId) || 0) + 1);
       markUserPresence(effectiveUserId, true);
