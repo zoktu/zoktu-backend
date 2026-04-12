@@ -11,6 +11,7 @@ import {
   removePushSubscription,
   upsertPushSubscription
 } from '../lib/webPush.js';
+import { decryptMessageContent } from '../lib/messageCrypto.js';
 
 const router = Router();
 
@@ -170,7 +171,7 @@ router.get('/', asyncHandler(async (req, res) => {
     messageId: d.messageId,
     type: d.type,
     title: d.title,
-    message: d.message,
+    message: decryptMessageContent(d.message),
     read: Boolean(d.read),
     createdAt: d.createdAt
   }));

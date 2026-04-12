@@ -866,7 +866,7 @@ const createNotificationsForMessage = async ({ roomDoc, doc, senderIdEffective, 
         messageId: String(doc._id),
         type,
         title,
-        message: preview,
+        message: encryptMessageContent(preview),
         read: false
       });
     }

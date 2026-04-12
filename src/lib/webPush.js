@@ -2,6 +2,7 @@ import webpush from 'web-push';
 import { env } from '../config/env.js';
 import PushSubscription from '../models/PushSubscription.js';
 import User from '../models/User.js';
+import { decryptMessageContent } from './messageCrypto.js';
 
 const DEFAULT_ICON = '/icons/icon-192.png';
 const DEFAULT_BADGE = '/icons/icon-192.png';
@@ -48,7 +49,8 @@ const getPushPreferenceForType = (notifications, type) => {
 
 const buildPushPayload = (notification) => {
   const title = String(notification?.title || 'Zoktu');
-  const body = String(notification?.message || 'You have a new notification');
+  const decryptedMsg = decryptMessageContent(notification?.message);
+  const body = String(decryptedMsg || 'You have a new notification');
   const roomId = String(notification?.roomId || '').trim();
   const type = String(notification?.type || 'system').toLowerCase();
   const targetUrl = String(notification?.url || buildRoomUrl(roomId, type));
