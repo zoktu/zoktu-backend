@@ -42,6 +42,7 @@ const buildAllowedOrigins = () => {
   const defaults = [
     'https://zoktu.com',
     'https://www.zoktu.com',
+    'https://api.zoktu.com',
     'http://localhost:8080',
     'http://localhost:5173'
   ];

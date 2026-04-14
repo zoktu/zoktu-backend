@@ -1174,7 +1174,36 @@ router.get('/rooms/:roomId/messages', (req, res) => {
         }
       }
 
-      let docs = await Model.find(query).sort({ createdAt: -1 }).limit(limit).lean();
+      // Optimization: To show the requested number of REAL messages without hitting
+      // the limit with system messages, we first find the timestamp of the N-th real message.
+      const cutoffQuery = { ...query, type: { $ne: 'system' } };
+      const cutoffDoc = await Model.findOne(cutoffQuery)
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(limit - 1)
+        .select('createdAt _id')
+        .lean()
+        .exec();
+
+      let docs;
+      if (cutoffDoc) {
+        // Fetch all messages (including system) since that cutoff message
+        docs = await Model.find({
+          ...query,
+          $or: [
+            { createdAt: { $gt: cutoffDoc.createdAt } },
+            { createdAt: cutoffDoc.createdAt, _id: { $gte: cutoffDoc._id } }
+          ]
+        })
+          .sort({ createdAt: -1 })
+          .limit(ROOM_MESSAGE_RETENTION_LIMIT * 3) // Safety cap
+          .lean();
+      } else {
+        // Fallback: fetch up to a safe limit if fewer than 'limit' real messages exist
+        docs = await Model.find(query)
+          .sort({ createdAt: -1 })
+          .limit(ROOM_MESSAGE_RETENTION_LIMIT * 2)
+          .lean();
+      }
 
       // identify current user (optional) and filter blocked users' messages
       const auth = await getAuthIdentity(req);

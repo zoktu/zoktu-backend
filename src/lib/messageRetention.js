@@ -39,18 +39,31 @@ export const pruneOldMessagesForRoom = async ({
   const retention = parsePositiveInt(keepLatest, DEFAULT_RETENTION_LIMIT);
 
   try {
-    const docs = await Model.find({ roomId: normalizedRoomId })
-      .sort({ createdAt: -1 })
-      .skip(retention)
-      .limit(DEFAULT_PRUNE_BATCH_SIZE)
-      .select('_id')
+    // Find the timestamp of the N-th (retention-th) most recent NON-SYSTEM message.
+    // This message serves as our "cutoff" point for what history we want to keep.
+    const cutoffDoc = await Model.findOne({ 
+      roomId: normalizedRoomId, 
+      type: { $ne: 'system' } 
+    })
+      .sort({ createdAt: -1, _id: -1 })
+      .skip(retention - 1)
+      .select('createdAt _id')
       .lean()
       .exec();
 
-    const ids = (docs || []).map((doc) => doc?._id).filter(Boolean);
-    if (!ids.length) return 0;
+    // If we have fewer than 'retention' real messages, don't prune anything yet.
+    if (!cutoffDoc) return 0;
 
-    const result = await Model.deleteMany({ _id: { $in: ids } }).exec();
+    // Delete ALL messages (any type) that are older than our cutoff message.
+    // This cleans up both old user messages and old system events.
+    const result = await Model.deleteMany({
+      roomId: normalizedRoomId,
+      $or: [
+        { createdAt: { $lt: cutoffDoc.createdAt } },
+        { createdAt: cutoffDoc.createdAt, _id: { $lt: cutoffDoc._id } }
+      ]
+    }).exec();
+
     return Number(result?.deletedCount || result?.n || 0);
   } catch (e) {
     return 0;
