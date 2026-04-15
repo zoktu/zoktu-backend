@@ -188,9 +188,30 @@ const shouldBotReply = async (roomDoc, senderId, content, msgType, replyTo) => {
 };
 
 const sanitizeBotText = (text) => {
-  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  let raw = String(text || '');
+
+  // Strip HTML tags (e.g. <p>, <br>, <b>, etc.)
+  raw = raw.replace(/<[^>]*>/g, ' ');
+
+  // Strip markdown bold/italic/code (**, *, __, `, ```)
+  raw = raw.replace(/(\*\*|__|``?`?|\*|_)/g, '');
+
+  // Strip prompt artifacts the model might echo back: [INST], [/INST], <s>, </s>
+  raw = raw.replace(/\[\/?(INST|SYS|s)\]/gi, '').replace(/<\/?s>/gi, '');
+
+  // Strip leading role prefixes the model sometimes outputs
+  raw = raw.replace(/^\s*(Baka\s*:|Assistant\s*:|Bot\s*:|AI\s*:)\s*/i, '');
+
+  // Strip lines that look like system instructions leaking through
+  raw = raw.replace(/^(You are|Keep a playful|Reply in|Never mention|Always reply|Match user|Do not mention|First sentence|Avoid repeat).*/gim, '');
+
+  // Collapse whitespace and trim
+  raw = raw.replace(/\s+/g, ' ').trim();
+
   if (!raw) return null;
   if (BOT_UNSAFE_PATTERN.test(raw)) return null;
+
+  // Trim to max 600 chars
   return raw.length > 600 ? raw.slice(0, 600).trim() : raw;
 };
 
@@ -1811,7 +1832,7 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
   try {
     const io = req.app.get('io');
     if (io) {
-      io.to(roomId).emit('room:message', {
+      const msgPayload = {
         id: doc._id.toString(),
         roomId,
         senderId: doc.senderId,
@@ -1822,7 +1843,23 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
         timestamp: new Date().toISOString(),
         replyTo: doc.replyTo,
         meta: doc.meta || {}
-      });
+      };
+
+      // Broadcast to everyone already in the socket room
+      io.to(roomId).emit('room:message', msgPayload);
+
+      // For DM rooms: also push directly to each participant's personal user:{id} socket room.
+      // This ensures the receiver sees the message even if they haven't joined the DM socket room yet
+      // (e.g. they are on the dashboard when the first DM arrives).
+      if (isDmRoomDoc(roomDoc)) {
+        const participants = (roomDoc?.participants || roomDoc?.members || []).map(String).filter(Boolean);
+        for (const participantId of participants) {
+          if (String(participantId) === String(senderIdEffective)) continue; // don't double-send to sender
+          try {
+            io.to(`user:${participantId}`).emit('room:message', msgPayload);
+          } catch (e) {}
+        }
+      }
     }
   } catch (err) {}
 
