@@ -27,6 +27,8 @@ import {
 } from './lib/roomCache.js';
 import { encryptMessageContent, decryptMessageContent } from './lib/messageCrypto.js';
 import { startUserCleanupJob } from './lib/userCleanup.js';
+import { sendSystemMessage } from './lib/systemMessages.js';
+
 
 const app = express();
 // Trust the first proxy (Render) so rate limiting uses correct client IP instead of Render's proxy IP
@@ -632,7 +634,14 @@ io.on('connection', (socket) => {
   socket.on('call:accepted', (data) => {
     if (!data?.partnerId) return;
     io.to(`user:${data.partnerId}`).emit('call:accepted', data);
+    
+    // Send system message to the DM room
+    if (data.roomId) {
+      const callType = data.type === 'video' ? 'Video' : 'Voice';
+      sendSystemMessage(io, data.roomId, `${callType} call started`);
+    }
   });
+
   socket.on('call:rejected', (data) => {
     if (!data?.partnerId) return;
     io.to(`user:${data.partnerId}`).emit('call:rejected', data);
@@ -644,7 +653,29 @@ io.on('connection', (socket) => {
   socket.on('call:ended', (data) => {
     if (!data?.partnerId) return;
     io.to(`user:${data.partnerId}`).emit('call:ended', data);
+
+    // Send system message to the DM room
+    if (data.roomId) {
+      sendSystemMessage(io, data.roomId, 'Call ended');
+    }
   });
+
+  socket.on('room:voice:join', async (data) => {
+    try {
+      const { roomId, userName } = data || {};
+      if (!roomId || !userName) return;
+      sendSystemMessage(io, roomId, `${userName} joined voice chat`);
+    } catch (e) {}
+  });
+
+  socket.on('room:voice:leave', async (data) => {
+    try {
+      const { roomId, userName } = data || {};
+      if (!roomId || !userName) return;
+      sendSystemMessage(io, roomId, `${userName} left voice chat`);
+    } catch (e) {}
+  });
+
 
   // Room messaging: accept { roomId, senderId, senderName, content }
   socket.on('room:message', async (payload) => {

@@ -5,6 +5,8 @@ import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import User from '../models/User.js';
 import Room from '../models/Room.js';
+import { sendSystemMessage } from '../lib/systemMessages.js';
+
 
 
 const router = Router();
@@ -61,7 +63,9 @@ router.post('/token', asyncHandler(async (req, res) => {
       const io = req.app.get('io');
       if (io) {
         io.to(roomId).emit('room:voice:status', { roomId, isActive: true });
+        sendSystemMessage(io, roomId, 'Voice chat started by an admin');
       }
+
     }
   }
 
