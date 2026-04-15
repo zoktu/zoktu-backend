@@ -8,6 +8,7 @@ import { Server as IOServer } from 'socket.io';
 import { env } from './config/env.js';
 import { connectDb } from './config/db.js';
 import routes from './routes/index.js';
+import callsRouter from './routes/calls.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { createServer } from 'http';
 import User from './models/User.js';
@@ -199,6 +200,7 @@ app.use('/api/auth/register', authLimiter);
 app.use('/api/auth/forgot-password', authLimiter);
 app.use('/api/auth/reset-password', authLimiter);
 app.use('/api/auth/verify-otp', authLimiter);
+app.use('/api/calls', callsRouter);
 app.use('/api', generalLimiter, checkGlobalBan, routes);
 
 app.use((req, res) => {
@@ -605,6 +607,28 @@ io.on('connection', (socket) => {
     } catch (e) {
       // ignore
     }
+  });
+
+  // --- Call Signaling Relay ---
+  socket.on('call:invite', (data) => {
+    if (!data?.partnerId) return;
+    io.to(`user:${data.partnerId}`).emit('call:invite', data);
+  });
+  socket.on('call:accepted', (data) => {
+    if (!data?.partnerId) return;
+    io.to(`user:${data.partnerId}`).emit('call:accepted', data);
+  });
+  socket.on('call:rejected', (data) => {
+    if (!data?.partnerId) return;
+    io.to(`user:${data.partnerId}`).emit('call:rejected', data);
+  });
+  socket.on('call:busy', (data) => {
+    if (!data?.callerId) return;
+    io.to(`user:${data.callerId}`).emit('call:busy', data);
+  });
+  socket.on('call:ended', (data) => {
+    if (!data?.partnerId) return;
+    io.to(`user:${data.partnerId}`).emit('call:ended', data);
   });
 
   // Room messaging: accept { roomId, senderId, senderName, content }
