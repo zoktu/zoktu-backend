@@ -41,7 +41,7 @@ router.post('/token', asyncHandler(async (req, res) => {
 
   // If it's a 1v1 call, we check if they are verified OR if it's an incoming call.
   // We'll allow Guests to at least receive calls for the "trailer" experience.
-  const isDirectCall = String(channelName).startsWith('ch_');
+  const isDirectCall = String(channelName).startsWith('ch_') || String(channelName).startsWith('dm_');
   if (!user.emailVerified && user.userType === 'guest' && !isDirectCall && !isGroupVoice) {
     return res.status(403).json({ error: 'Email verification required to initiate calls' });
   }
