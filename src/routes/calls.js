@@ -4,6 +4,8 @@ const { RtcTokenBuilder, RtcRole } = pkg;
 import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import User from '../models/User.js';
+import Room from '../models/Room.js';
+
 
 const router = Router();
 
