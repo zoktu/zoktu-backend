@@ -28,8 +28,39 @@ router.post('/token', asyncHandler(async (req, res) => {
     return res.status(404).json({ error: 'User not found' });
   }
 
-  if (!user.emailVerified) {
-    return res.status(403).json({ error: 'Email verification required to make calls' });
+  const isGroupVoice = String(channelName).startsWith('room_');
+  const roomId = isGroupVoice ? String(channelName).replace('room_', '') : null;
+
+  if (isGroupVoice && !user.emailVerified) {
+    return res.status(403).json({ error: 'Email verification required for Group Voice Chat' });
+  }
+
+  // If it's a 1v1 call, we check if they are verified OR if it's an incoming call.
+  // We'll allow Guests to at least receive calls for the "trailer" experience.
+  const isDirectCall = String(channelName).startsWith('ch_');
+  if (!user.emailVerified && user.userType === 'guest' && !isDirectCall && !isGroupVoice) {
+    return res.status(403).json({ error: 'Email verification required to initiate calls' });
+  }
+
+  // Room Voice Initiation Logic: Only Owner/Admin can start it
+  if (isGroupVoice) {
+    const room = await Room.findById(roomId).select('owner admins isVoiceActive').lean();
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+
+    const isAdmin = room.owner === userId || (Array.isArray(room.admins) && room.admins.includes(userId));
+    
+    if (!room.isVoiceActive && !isAdmin) {
+      return res.status(403).json({ error: 'Voice chat must be started by an admin' });
+    }
+
+    // If admin is joining and it's not active yet, mark it active
+    if (isAdmin && !room.isVoiceActive) {
+      await Room.findByIdAndUpdate(roomId, { isVoiceActive: true });
+      const io = req.app.get('io');
+      if (io) {
+        io.to(roomId).emit('room:voice:status', { roomId, isActive: true });
+      }
+    }
   }
 
   const isPremium = Boolean(
@@ -48,13 +79,13 @@ router.post('/token', asyncHandler(async (req, res) => {
   const currentTime = Math.floor(Date.now() / 1000);
   const privilegeExpireTime = currentTime + expireTime;
 
-  // Build the token (role: PUBLISHER)
+  // Build the token (role: PUBLISHER) using User Account (supports strings)
   const role = RtcRole.PUBLISHER;
-  const token = RtcTokenBuilder.buildTokenWithUid(
+  const token = RtcTokenBuilder.buildTokenWithUserAccount(
     env.agoraAppId,
     env.agoraAppCertificate,
     channelName,
-    uid,
+    String(uid), // map string UID to userAccount
     role,
     privilegeExpireTime
   );

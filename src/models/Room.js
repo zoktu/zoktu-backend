@@ -19,6 +19,7 @@ const RoomSchema = new mongoose.Schema({
   category: String,
   hiddenFor: [String],
   isActive: { type: Boolean, default: true },
+  isVoiceActive: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });

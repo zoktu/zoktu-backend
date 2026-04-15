@@ -611,9 +611,23 @@ io.on('connection', (socket) => {
   });
 
   // --- Call Signaling Relay ---
-  socket.on('call:invite', (data) => {
-    if (!data?.partnerId) return;
-    io.to(`user:${data.partnerId}`).emit('call:invite', data);
+  socket.on('call:invite', async (data) => {
+    if (!data?.partnerId || !effectiveUserId) return;
+
+    try {
+      // Security: Only verified users can initiate calls
+      const caller = await User.findById(effectiveUserId).select('emailVerified userType').lean().catch(() => null);
+      const isVerified = caller?.emailVerified || caller?.userType === 'premium';
+      
+      if (!isVerified) {
+        socket.emit('call:error', { message: 'Email verification required to initiate calls' });
+        return;
+      }
+
+      io.to(`user:${data.partnerId}`).emit('call:invite', data);
+    } catch (e) {
+      console.warn('[Socket] Call invite failed:', e?.message || e);
+    }
   });
   socket.on('call:accepted', (data) => {
     if (!data?.partnerId) return;
