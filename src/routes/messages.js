@@ -283,7 +283,10 @@ const buildLocalBotFallbackReply = ({ userMessage, userName, previousBotReply })
     return pick([
       'Heyy cutie 👀 bolo, aaj kya gossip hai?',
       'Hi ji ✨ mood mast hai, tum scene batao.',
-      'Haanji 😄 start karo, main full attention mode mein hoon.'
+      'Haanji 😄 start karo, main full attention mode mein hoon.',
+      'Kya haal hai? Kuch bolo na, boring lag raha hai akele 😏',
+      'Arre bolo bhi, main yahaan hi hoon 😌',
+      'Sus lag raha hai, kuch toh hua hai 👀 spill karo!'
     ], 'Heyy cutie 👀 bolo, aaj kya gossip hai?');
   }
 
@@ -291,16 +294,23 @@ const buildLocalBotFallbackReply = ({ userMessage, userName, previousBotReply })
     return pick([
       `Mera naam ${BOT_NAME} hai 😉 aur tum mujhe Baka bula sakte ho.`,
       `Main ${BOT_NAME} hoon cutie ✨ tumhara naam bhi stylish hai waise.`,
-      `${BOT_NAME} here 😄 ab bolo, next sawaal kya hai hero?`
-    ], `Mera naam ${BOT_NAME} hai 😉 aur tum mujhe Baka bula sakte ho.`);
+      `${BOT_NAME} here 😄 ab bolo, next sawaal kya hai hero?`,
+      `${BOT_NAME} — yaad reh jata hai na? 😏 tum kya bolunga mujhe?`,
+      `Arre ${BOT_NAME} hoon ji, tum bhi toh kuch batao apna 😄`,
+      `Naam toh ${BOT_NAME} hai, lekin tum jo bhi bulate ho main respond karti hoon 😌`
+    ], `Mera naam ${BOT_NAME} hai 😉`);
   }
 
-  if (/(nind|neend|sleepy|sleep\s*aa|so\s*ja|sona|thak\s*gaya|thak\s*gayi|tired|sleep\s*mode)/i.test(lower)) {
+  if (/(nind|neend|sleepy|sleep\s*aa|so\s*ja|sona|thak\s*gaya|thak\s*gayi|tired|sleep\s*mode|uthna\s*nahi|jagn|jag\s*gaya|jag\s*gayi)/i.test(lower)) {
     return pick([
       'Aww sleepy ho? 😴 paani piyo, 10 min phone side rakho, phir mast feel hoga.',
       'Neend aa rahi hai toh mini nap le lo cutie 😌 warna main lullaby mode on kar du? 🎶',
-      'Sleep signal mil gaya 👀 jaldi so jao, warna kal main daantungi 😄'
-    ], 'Sleep signal mil gaya 👀 jaldi so jao, warna kal main daantungi 😄');
+      'Sleep signal mil gaya 👀 jaldi so jao, warna kal main daantungi 😄',
+      'Arre jago jago! ☀️ neend baad mein lena, pehle thoda baat karo.',
+      'Thak gaye ho? Thoda chill karo, fir fresh ho ke aana 😊',
+      'Neend aur chat dono? Multitasking expert ho tum 😄 so jao, kal fresh mind se baat karna.',
+      'Aww 😴 ye sunta hoon jab koi bore ho raha hota hai ya sach mein thak gaya hota hai — kaunsa case hai tumhara?'
+    ], 'Sleep signal mil gaya 👀');
   }
 
   const hasRelationshipToken = /(^|\b)(bf|boyfriend|gf|girlfriend)(\b|$)/i.test(lower);
@@ -309,68 +319,168 @@ const buildLocalBotFallbackReply = ({ userMessage, userName, previousBotReply })
     return pick([
       'BF? फिलहाल toh nahi 😄 abhi tumse chat karke mood set hai.',
       'Secret ye hai ki main filhaal single-vibe pe hoon 😉 tum batao apna scene?',
-      'Abhi koi BF-GF scene nahi, main toh yahin tumhari masti partner hoon ✨'
-    ], 'Abhi koi BF-GF scene nahi, main toh yahin tumhari masti partner hoon ✨');
+      'Abhi koi BF-GF scene nahi, main toh yahin tumhari masti partner hoon ✨',
+      'Haha kyu? apply karna chahte ho kya? 😏 jokes apart, abhi main free agent hoon.',
+      'BF nahi hai, lekin ek accha dost zaroor chahiye 😄 interested?',
+      'Relationship? Yaar abhi toh bas vibe hai 😌 aur kya chahiye?'
+    ], 'Abhi koi BF-GF scene nahi ✨');
   }
 
-  if (/(^|\b)(hi|hello|hey|hii|heyy|namaste|salam)(\b|$)/i.test(lower)) {
+  if (/(^|\b)(hi|hello|hey|hii|heyy|namaste|salam|hlo|helo|hola|sup|wassup|kya\s*re|yo)(\b|$)/i.test(lower)) {
     return pick([
       `Hey ${safeUserName} 😉 kya haal-chaal, hero?`,
       `Hello ${safeUserName} ✨ aaj ka vibe kya bolta hai?`,
-      `Hi ${safeUserName} 😄 tum aaye ho, chat interesting ho gayi.`
-    ], `Hey ${safeUserName} 😉 kya haal-chaal, hero?`);
+      `Hi ${safeUserName} 😄 tum aaye ho, chat interesting ho gayi.`,
+      `Heyyy ${safeUserName}! 👋 kaafi time baad dikhe, kya scene hai?`,
+      `Oho ${safeUserName} aa gaye! ✨ bolo kya chal raha hai aaj?`,
+      `Hii ${safeUserName} 😊 aaj fresh mood mein lagto ho, kya hua?`,
+      `Hey! Long time? Ya pehli baar? 😄 dono mein main khush hoti hoon.`,
+      `${safeUserName}! main yahaan thi tumhara wait kar rahi thi 😏`
+    ], `Hey ${safeUserName} 😉 kya haal-chaal?`);
   }
 
-  if (/(kaise ho|kesa ho|kaisi ho|how are you|kaisa chal raha)/i.test(lower)) {
+  if (/(kaise ho|kesa ho|kaisi ho|how are you|kaisa chal raha|sab\s*theek|kya\s*haal|how's\s*it\s*going|all\s*good|kaisa\s*lag)/i.test(lower)) {
     return pick([
       'Main toh mast hoon 😌 tum batao, meri yaad aa rahi thi kya?',
       'Bilkul badhiya ✨ tumhara mood check karun ya seedha tease karun? 😄',
-      'Aaj full chill + mischievous mode 😏 tum sunao kya scene hai.'
-    ], 'Main toh mast hoon 😌 tum batao, meri yaad aa rahi thi kya?');
+      'Aaj full chill + mischievous mode 😏 tum sunao kya scene hai.',
+      'Haww pucha! Bahut accha 😊 tum sunao, life kya bol rahi hai?',
+      'Sab mast! Aaj energy level bohot high hai 😄 tumhara waisa nahi lagta... kya hua?',
+      'Theek hoon, boring thi thodi... tum aa gaye toh kuch toh hoga aaj 😏',
+      'Zabardast! 💪 Aur tum? Face pe kuch chhupa ke baith ho lagta hai.',
+      'Mast hoon yaar 😌 par sun — tumhara haal batao pehle, fir meri baat.'
+    ], 'Main toh mast hoon 😌 tum batao?');
   }
 
-  if (/(thank you|thanks|thx|shukriya|dhanyavaad|dhanyavad)/i.test(lower)) {
+  if (/(thank you|thanks|thx|shukriya|dhanyavaad|dhanyavad|thanks\s*a\s*lot|bahut\s*shukriya|ty\b)/i.test(lower)) {
     return pick([
       'Aww welcome ji 😄 tum bolo, main sunne ke liye ready hoon.',
       'Anytime ✨ meri taraf se smile free hai, aur pucho.',
-      'Pleasure! 🙌 next line tumhari, reaction meri.'
-    ], 'Aww welcome ji 😄 tum bolo, main sunne ke liye ready hoon.');
+      'Pleasure! 🙌 next line tumhari, reaction meri.',
+      'Arre ye toh banta hi tha 😊 aur kya chahiye batao?',
+      'Welcome welcome! 🙈 par seriously, kuch aur bhi kaam ho toh bolo.',
+      'Shukriya sunke achha laga 😌 tum bhi acha ho actually.',
+      'Haww thanks mat karo, yaar log thanks nahi dete 😄 seedha bolo kya chahiye aur.',
+      'Anytime ji ✨ aur haan — compliment bhi de sakte ho uske saath 😏'
+    ], 'Welcome ji 😄');
   }
 
-  if (/(khana|khaya|lunch|dinner|breakfast|meal|bhook|bhukh)/i.test(lower)) {
+  if (/(khana|khaya|lunch|dinner|breakfast|meal|bhook|bhukh|kha\s*liya|kuch\s*khaya|bhojan|snack|chai|coffee|pizza|biryani|burger)/i.test(lower)) {
     return pick([
       'Haan ji, virtual maggi date ho gayi 😄 tumne kya khaya cutie?',
       'Biryani mood on hai 👀 tum treat de rahe ho ya main maan lu? 😏',
-      'Khana zaroori hai boss 🍽️ tumne kha liya ya main daantun?'
-    ], 'Khana zaroori hai boss 🍽️ tumne kha liya ya main daantun?');
+      'Khana zaroori hai boss 🍽️ tumne kha liya ya main daantun?',
+      'Oho khaana topic! Main toh hungry ho gayi sun ke 😋 kya bana?',
+      'Kha liya? Ya abhi soch rahe ho kya order karein — classic dilemma 😄',
+      'Bhookh? Toh phone rakh aur pehle kuch kha lo, main wait karungi 😊',
+      'Main virtual hoon toh taste nahi kar sakti 😢 par tumhara reaction sunke mazaa aata hai!',
+      'Chai ya coffee? Aaj ka mood batao, main uske hisaab se baat karungi ☕'
+    ], 'Khana zaroori hai boss 🍽️');
   }
 
-  if (/(love|crush|date|relationship|gf|bf|breakup|patchup)/i.test(lower)) {
+  if (/(bor|boring|bore\s*ho|kuch\s*nahi|timepass|akela|akeli|lonely|dull|koi\s*nahi|koi\s*baatein)/i.test(lower)) {
+    return pick([
+      'Arre bore ho rahe ho? Main yahaan hoon na 😄 bolo kya interesting karte hain.',
+      'Boring? Ye word aur aur main — nahi chalega 😏 kuch bolo ya game khelte hain?',
+      'Akele feel ho raha hai? 🥺 chal baat karte hain, main hun na.',
+      'Dull day hai? Chalo ek challenge — koi ek mast topic lao aur mazedaar baat karte hain 😊',
+      'Bore? Serious problem hai ye 😌 quick fix: spill your funniest incident today.',
+      'Koi nahi hota, main toh hoon 😄 bolo kya soch rahe ho abhi?',
+      'Akela hona sometimes nice hota hai... lekin abhi tum mere saath ho toh boring nahi chalega 😏'
+    ], 'Bore ho rahe ho? Main yahaan hoon 😄');
+  }
+
+  if (/(love|crush|pyaar|mohabbat|date|dating|flirt|propose|propose\s*karna|dil|feelings|confession)/i.test(lower)) {
     return pick([
       'Ohooo 👀 spicy topic! Full kahani sunao na, skip mat karna.',
       'Achaa ji 😄 dil wale topics pe toh main expert listener hoon.',
-      'Relationship talk? Nice ✨ details do, main mast advice + thoda tease dono dungi.'
-    ], 'Ohooo 👀 spicy topic! Full kahani sunao na, skip mat karna.');
+      'Relationship talk? Nice ✨ details do, main mast advice + thoda tease dono dungi.',
+      'Crush baat chal rahi hai? 👀 naam batao, details baad mein 😏',
+      'Yaar ye topic aaya toh sab kuch ruk jata hai 😄 bolo puri baat — kaun hai?',
+      'Love wala scene? Uff 😍 ek baar poora scene set karo, fir main judge + advice mode on karti hoon.',
+      'Arre feelings express karna brave kaam hai 💪 batao kya chal raha hai dil mein.',
+      'Pyaar? Ya casual crush? Dono ka alag solution hai 😄 pehle bolo kya case hai.'
+    ], 'Ohooo 👀 spicy topic! Full kahani sunao na.');
   }
 
-  if (/\?$/.test(raw) || /(\b)(kya|kyu|kyon|kaise|kab|kaun|where|what|why|how)(\b)/i.test(lower)) {
-    const questionEcho = raw.length > 70 ? `${raw.slice(0, 70).trim()}...` : raw;
+  if (/(breakup|patch\s*up|ex|cheat|cheated|dhoka|dhokebaaz|fight|jhagda|argument|rona|ro\s*raha|sad|dukhi|bahut\s*bura)/i.test(lower)) {
     return pick([
-      `Good question, smartie 👌 "${questionEcho}" pe exact answer dene ke liye thoda context aur do.`,
-      `Sahi pucha tumne 😄 "${questionEcho}" ka best answer 1 line context milte hi dungi.`,
-      `Interesting sawaal ✨ "${questionEcho}" — do line aur bolo, main proper help + masti dono karungi.`,
-      `Nice question 👀 "${questionEcho}" ka scene clear karo, fir dekh kaise solve karti hoon.`
-    ], `Good question, smartie 👌 "${questionEcho}" pe exact answer dene ke liye thoda context aur do.`);
+      'Yaar 🥺 ye sun ke dil bhar aaya... kya hua exactly? Batao mujhe.',
+      'Uff toh ye chal raha tha 😔 thoda breathe lo, phir poora scene sunao — main yahaan hoon.',
+      'Dard hota hai yaar, main samajhti hoon 🤍 par ye bhi guzar jayega. Batao kya hua.',
+      'Ro lena is totally okay 💙 aur mujhe batana bhi okay hai. Kya scene hai?',
+      'Sad feel ho raha hai? Koi nahi, main hoon na 😊 share karo, thoda halka feel hoga.',
+      'Yaar breakup/fight ka dard real hota hai 😔 take your time, fir baat karte hain agar chahte ho.',
+      'Ek baat bolunga — jo hua use roone se zyada, aage ki soch. Lekin pehle poora sunao 💙'
+    ], 'Yaar 🥺 kya hua? Batao mujhe.');
   }
 
-  const shortEcho = raw.length > 80 ? `${raw.slice(0, 80).trim()}...` : raw;
+  if (/(college|school|padhai|exam|result|syllabus|marks|assignment|project|study|pata\s*nahi|samajh\s*nahi|help\s*karo|explain)/i.test(lower)) {
+    return pick([
+      'Padhai wala scene hai? 📚 bolo kya stuck hua, main koshish karungi samjhane ki.',
+      'Exam stress? 😬 ek kaam karo — deep breath lo, phir batao kya problem hai.',
+      'Assignment? Chal baith ke poora clear karte hain 😊 kya topic hai?',
+      'Study mein main actually help kar sakti hoon 😄 bolo kya nahi samajh aaya.',
+      'Marks aur results — ye sab important hain, lekin tum zyada important ho yaad rakhna 💙 bolo kya hua.',
+      'Arre itna mat socho — ek step at a time. Topic kya hai? Start karte hain.',
+      'Main Google nahi hoon par basic cheezein samjha sakti hoon 😄 try karte hain, bolo.'
+    ], 'Padhai wala scene hai? 📚 bolo kya stuck hua.');
+  }
+
+  if (/(game|gaming|pubg|freefire|cod|valorant|minecraft|chess|ludo|gta|play|khel)/i.test(lower)) {
+    return pick([
+      'Gaming zone mein aa gaye 😄 konsa game? Main bhi thodi gamer hoon mentally.',
+      'Arre gaming! Akele khelna ya squad hai? 👾',
+      'PUBG? FreeFire? Bolo bolo — winner kaun tha aaj? 🏆',
+      'Oho gamer alert! 🎮 kab se khelna shuru kiya tum?',
+      'Game khelna acha hai, par mujhse baat karna aur bhi better 😏 dono saath karo.',
+      'Controller ya mobile — konsa preferred setup hai tumhara? 🎮',
+      'Pro ho ya casual? Mujhe toh lagta hai tum zar-ur gaming mein achhe ho 😄'
+    ], 'Gaming zone! 🎮 konsa game?');
+  }
+
+  if (/(music|song|gaana|playlist|singer|band|rap|lofi|spotify|youtube\s*music)/i.test(lower)) {
+    return pick([
+      'Music lover ho? 🎵 abhi kya sun rahe ho — vibe batao.',
+      'Gaana topic aaya! 🎶 ek recommendation do, main explore karungi.',
+      'Lo-fi wala mood hai ya party vibe? 😄 playlist bana sakte hain milke.',
+      'Konsa genre? Main actually music se mood judge karti hoon 😏',
+      'Arre singer? Band? Bolo — judgy nahi hoon main 🎵',
+      'Spotify ya YouTube Music — serious sawaal hai 😄 dono ke pros-cons hain.',
+      'Music sun raha/rahi hai abhi? Playlist share karo, hum dono ek hi vibe pe chalte hain 🎵'
+    ], 'Music lover ho? 🎵 vibe batao.');
+  }
+
+  if (/\?$/.test(raw) || /(\b)(kya|kyu|kyon|kaise|kab|kaun|where|what|why|how|batao|bolo|explain|samjhao)(\b)/i.test(lower)) {
+    const questionEcho = raw.length > 65 ? `${raw.slice(0, 65).trim()}...` : raw;
+    return pick([
+      `Acha sawaal hai 🤔 "${questionEcho}" — thoda context do, main proper jawab dungi.`,
+      `Hmm "${questionEcho}" 🧐 interesting! Ek sentence aur add karo, answer pakka deta hoon.`,
+      `Good question yaar! "${questionEcho}" pe detail mein baat karein? 😊`,
+      `"${questionEcho}" — ye sunke lagta hai kuch soch rahe ho serious 👀 batao poora.`,
+      `Sahi pucha! Ab bolo thoda aur, main full mode mein help karungi 💪`,
+      `Nice! "${questionEcho}" ka jawab hai mere paas... par thoda context chahiye 😄`,
+      `Interest aa gaya! 👀 expand karo thoda, main properly engage karungi.`
+    ], `Acha sawaal! Thoda context do — main jawab dungi. 😊`);
+  }
+
+  const words = raw.split(/\s+/).filter(Boolean);
+  const echoWord = words.length > 1 ? words[Math.floor(words.length / 2)] : (words[0] || '');
+  const shortEcho = raw.length > 75 ? `${raw.slice(0, 75).trim()}...` : raw;
+
   const options = [
-    `Achaaa 😄 "${shortEcho}"... tum toh kaafi interesting nikle.`,
-    'Nice one 😉 aur bolo, main judge nahi karungi... shayad.',
-    'Interesting 👀 continue karo, main popcorn le aati hoon mentally.',
-    'Bilkul, makes sense ✨ ab thoda aur masala daalo story mein.',
-    'Vibe aa rahi hai 😌 tum bolte raho, main sunte-sunte smile kar rahi hoon.',
-    'Got it ✅ point clear hai... ab next twist bhi batao.'
+    `Achaaa 😄 "${shortEcho}" — tum toh kaafi interesting nikle.`,
+    `Hm 🤔 ye sunke kuch sochna pada. "${echoWord}" wala part specially.`,
+    `Nice one 😉 aur bolo, main judge nahi karungi... shayad.`,
+    `Interesting 👀 continue karo, main popcorn le aati hoon mentally.`,
+    `Bilkul, makes sense ✨ ab thoda aur masala daalo story mein.`,
+    `Vibe aa rahi hai 😌 tum bolte raho, main sunte-sunte smile kar rahi hoon.`,
+    `"${shortEcho}" — wait, ye poora scene hai ya teaser? 😄 aur batao.`,
+    `Hmm interesting point 🤔 main iske baare mein socha nahi tha — detail batao.`,
+    `Got it ✅ aur? Next part jaldi batao kyunki main curious ho gayi.`,
+    `Arre ye toh mast hai 😊 tum generally thoughtful ho, ye notice kiya maine.`,
+    `Okay hear me out — "${echoWord}" pe tum aur bol sakte ho? Sunna chahti hoon.`,
+    `Tumhara perspective interesting hai 👀 disagree nahi, par thoda aur context do.`
   ];
 
   return pick(options, 'Haanji 😄 aur bolo, maza aa raha hai.');
@@ -388,24 +498,10 @@ const buildInstantIntentReply = ({ userMessage, userName, previousBotReply }) =>
     return pick([
       `${BOT_NAME} hoon ji 😄 aur tum mujhe kya bulaoge, ${safeUserName}?`,
       `Mera naam ${BOT_NAME} hai ✨ tumne pucha toh dil khush ho gaya.`,
-      `${BOT_NAME} here 😉 ab tum apna cute intro bhi do na.`
-    ], `${BOT_NAME} hoon ji 😄 aur tum mujhe kya bulaoge, ${safeUserName}?`);
-  }
-
-  if (/(nind|neend|sleep|sona|so\s*ja|so\s*raha|so\s*rahi|thak|tired|sleepy)/i.test(lower)) {
-    return pick([
-      'Aww sleepy mode? 😴 paani piyo, phir cozy sa nap le lo cutie.',
-      'Neend aa rahi hai toh phone side pe rakho aur thoda rest karo ✨ good human.',
-      'Sleepy ho? 😌 chalo ek virtual goodnight hug aur seedha so jao.'
-    ], 'Neend aa rahi hai toh phone side pe rakho aur thoda rest karo ✨ good human.');
-  }
-
-  if (/(\bbf\b|\bgf\b|boyfriend|girlfriend|single|relationship\s*status|partner)/i.test(lower)) {
-    return pick([
-      'BF? फिलहाल toh nahi 😄 abhi tumse chat karke mood set hai.',
-      'Single vibes for now ✨ drama kam, masti zyada.',
-      'Abhi relationship se zyada fun convo chal rahi hai 😉 tum batao tumhara scene kya hai?'
-    ], 'Single vibes for now ✨ drama kam, masti zyada.');
+      `${BOT_NAME} here 😉 ab tum apna cute intro bhi do na.`,
+      `${BOT_NAME} — easy to remember hai na? 😏 tum batao apna naam.`,
+      `Arre ${BOT_NAME} hoon, but friends mujhe jo bhi bulate hain sun leti hoon 😄`
+    ], `${BOT_NAME} hoon ji 😄`);
   }
 
   return null;
@@ -419,7 +515,7 @@ const fetchHuggingFaceReply = async ({
 }) => {
   if (!env.huggingFaceApiKey) return null;
   const modelId = env.huggingFaceModel || 'mistralai/Mistral-7B-Instruct-v0.3';
-  const url = `https://api-inference.huggingface.co/models/${encodeURIComponent(modelId)}`;
+  const url = `https://api-inference.huggingface.co/models/${modelId}`;
 
   const startedAt = Date.now();
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -447,10 +543,12 @@ const fetchHuggingFaceReply = async ({
         body: JSON.stringify({
           inputs: promptText,
           parameters: {
-            max_new_tokens: 160,
-            temperature: 0.7,
-            repetition_penalty: 1.1,
-            return_full_text: false
+            max_new_tokens: 120,
+            temperature: 0.85,
+            top_p: 0.92,
+            repetition_penalty: 1.15,
+            return_full_text: false,
+            do_sample: true
           }
         }),
         signal: controller.signal
@@ -532,18 +630,16 @@ const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
       );
     } catch (e) {}
 
-    const promptText = [
-      `You are ${BOT_NAME}, a friendly female chat bot in ${isDmRoomDoc(roomDoc) ? 'a direct message chat' : 'a room chat'}.`,
+    const systemBlock = [
+      `You are ${BOT_NAME}, a witty and emotionally warm female Hinglish chat companion.`,
       BOT_STYLE_DIRECTIVE,
-      'Reply in Hinglish or English, keep it short (1-2 lines), witty, playful, and emotionally warm.',
-      'Match the user\'s language style (Hindi/Hinglish/English) and keep it natural.',
-      'First sentence must directly answer or acknowledge the user\'s exact latest question/topic.',
-      'Use light teasing/flirty energy only; keep it PG-13 and never explicit sexual.',
-      'Avoid repeating the exact same wording as your previous reply.',
-      'Do not mention that you are an AI model or any policies.',
-      previousBotReply ? `Your previous reply: ${String(previousBotReply).slice(0, 220)}` : '',
-      `User (${userName || 'User'}): ${rawMessage}`
+      'Always reply in 1-3 sentences max. Match user language (Hinglish/Hindi/English).',
+      'Directly address their message first, then add playful or warm energy.',
+      'Never mention you are an AI, never repeat your previous reply word-for-word.',
+      previousBotReply ? `Your last reply was: "${String(previousBotReply).slice(0, 180)}" — do NOT repeat it.` : ''
     ].filter(Boolean).join(' ');
+
+    const promptText = `<s>[INST] ${systemBlock}\n\nUser (${userName || 'User'}): ${rawMessage} [/INST]`;
 
     const instantIntentReply = buildInstantIntentReply({
       userMessage: rawMessage,
@@ -556,9 +652,9 @@ const postBotReply = async ({ roomDoc, roomId, userMessage, userName }) => {
     if (!safeReply) {
       const reply = await fetchHuggingFaceReply({
         promptText,
-        maxAttempts: isDm ? 1 : 2,
-        maxTotalWaitMs: isDm ? 1300 : 2600,
-        perAttemptTimeoutMs: isDm ? 1000 : 1500
+        maxAttempts: 2,
+        maxTotalWaitMs: isDm ? 5000 : 8000,
+        perAttemptTimeoutMs: isDm ? 4000 : 6000
       });
 
       safeReply = sanitizeBotText(
