@@ -62,14 +62,22 @@ export async function sendMail({ to, subject, text, html, from, replyTo }) {
   }
 
   if (sendgridEnabled) {
-    return sgMail.send({
-      to,
-      from: resolvedFrom,
-      subject,
-      text,
-      html,
-      replyTo: replyTo || resolvedFrom
-    });
+    console.log(`📧 Attempting to send email via SendGrid to: ${to} | Subject: ${subject}`);
+    try {
+      const response = await sgMail.send({
+        to,
+        from: resolvedFrom,
+        subject,
+        text,
+        html,
+        replyTo: replyTo || resolvedFrom
+      });
+      console.log(`✅ Email sent successfully via SendGrid to: ${to}`);
+      return response;
+    } catch (error) {
+      console.error('❌ SendGrid Error:', error.response?.body || error.message || error);
+      throw error;
+    }
   }
 
   if (!transporter) {
