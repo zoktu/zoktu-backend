@@ -9,6 +9,7 @@ import { env } from './config/env.js';
 import { connectDb } from './config/db.js';
 import routes from './routes/index.js';
 import callsRouter from './routes/calls.js';
+import { requireAuth } from './middleware/auth.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { createServer } from 'http';
 import User from './models/User.js';
@@ -200,7 +201,7 @@ app.use('/api/auth/register', authLimiter);
 app.use('/api/auth/forgot-password', authLimiter);
 app.use('/api/auth/reset-password', authLimiter);
 app.use('/api/auth/verify-otp', authLimiter);
-app.use('/api/calls', callsRouter);
+app.use('/api/calls', requireAuth, callsRouter);
 app.use('/api', generalLimiter, checkGlobalBan, routes);
 
 app.use((req, res) => {

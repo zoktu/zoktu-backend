@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { RtcTokenBuilder, RtcRole } from 'agora-token';
+import pkg from 'agora-token';
+const { RtcTokenBuilder, RtcRole } = pkg;
 import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import User from '../models/User.js';
@@ -7,10 +8,10 @@ import User from '../models/User.js';
 const router = Router();
 
 // Cache user status for simple auth checking inline rather than full DB trip if possible
-// But we'll rely on the JWT verification which sets req.userId
+// But we'll rely on the JWT verification which sets req.userId...
 router.post('/token', asyncHandler(async (req, res) => {
   const { channelName, callType, uid } = req.body;
-  const userId = req.userId;
+  const userId = req.user.id;
 
   if (!env.agoraAppId || !env.agoraAppCertificate) {
     return res.status(500).json({ error: 'Agora credentials not configured' });
