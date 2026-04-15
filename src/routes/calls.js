@@ -6,7 +6,7 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import User from '../models/User.js';
 import Room from '../models/Room.js';
 import { sendSystemMessage } from '../lib/systemMessages.js';
-
+import { findUserSafely } from '../utils/userLookup.js';
 
 
 const router = Router();
@@ -26,7 +26,7 @@ router.post('/token', asyncHandler(async (req, res) => {
   }
 
   // Find user to verify permissions
-  const user = await User.findById(userId).select('emailVerified isPremium userType premiumUntil subscription').lean();
+  const user = await findUserSafely(userId, 'emailVerified isPremium userType premiumUntil subscription');
 
   if (!user) {
     return res.status(404).json({ error: 'User not found' });

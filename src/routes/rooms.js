@@ -8,6 +8,7 @@ import RoomJoinRequest from '../models/RoomJoinRequest.js';
 import { getModelForRoom } from '../models/Message.js';
 import { users, upsertUserInMemory } from '../lib/userStore.js';
 import User from '../models/User.js';
+import { findUserSafely } from '../utils/userLookup.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
 import { encryptMessageContent } from '../lib/messageCrypto.js';
 import { pruneOldMessagesForRoom } from '../lib/messageRetention.js';
@@ -1476,7 +1477,7 @@ router.post('/:id/ban', asyncHandler(async (req, res) => {
     const bannedIds = [];
     if (targetUserId) bannedIds.push(targetUserId);
     try {
-      const target = targetUserId ? await User.findById(targetUserId).lean().catch(() => null) : null;
+      const target = targetUserId ? await findUserSafely(targetUserId) : null;
       const ipToBan = ip || (target && target.lastIp) || null;
       if (target && target.guestId) bannedIds.push(target.guestId);
 

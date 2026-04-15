@@ -7,6 +7,7 @@ import User from '../models/User.js';
 import Order from '../models/Order.js';
 import { sendMail } from '../lib/mailer.js';
 import { requireAuth } from '../middleware/auth.js';
+import { findUserSafely } from '../utils/userLookup.js';
 
 const router = Router();
 
@@ -40,14 +41,7 @@ router.post('/create-order', requireAuth, async (req, res) => {
     // Build customer details from authenticated user (prevent client tampering)
     const customerId = req.user?.id || req.user?._id || req.user?.userId || null;
     // Load full user profile to validate emailVerified and phone
-    let profile = null;
-    if (customerId) {
-      const qOr = [{ guestId: String(customerId) }, { email: String(customerId) }];
-      if (/^[0-9a-fA-F]{24}$/.test(String(customerId))) {
-        qOr.push({ _id: new mongoose.Types.ObjectId(String(customerId)) });
-      }
-      profile = await User.findOne({ $or: qOr }).lean().exec();
-    }
+    const profile = customerId ? await findUserSafely(customerId) : null;
     if (!profile) return res.status(400).json({ message: 'Invalid user' });
     if (!profile.emailVerified) return res.status(403).json({ message: 'Only email-verified users can purchase Premium' });
 
@@ -169,11 +163,7 @@ router.get('/return', async (req, res) => {
     if (status === 'PAID') {
       const customerId = ord?.customerId || data.customer_details?.customer_id;
       if (customerId) {
-        const qOr = [{ guestId: String(customerId) }, { email: String(customerId) }];
-        if (/^[0-9a-fA-F]{24}$/.test(String(customerId))) {
-          qOr.push({ _id: new mongoose.Types.ObjectId(String(customerId)) });
-        }
-        const user = await User.findOne({ $or: qOr }).exec();
+        const user = await findUserSafely(customerId);
         if (user) {
           const days = (ord?.plan === 'yearly') ? 365 : 30;
           const premiumUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
@@ -263,11 +253,7 @@ router.post('/webhook', async (req, res) => {
       try {
         const customerId = ord?.customerId || payload.customer_details?.customer_id || payload.data?.customer_id || '';
         if (customerId) {
-          const qOr = [{ guestId: String(customerId) }, { email: String(customerId) }];
-          if (/^[0-9a-fA-F]{24}$/.test(String(customerId))) {
-            qOr.push({ _id: new mongoose.Types.ObjectId(String(customerId)) });
-          }
-          const user = await User.findOne({ $or: qOr }).exec();
+          const user = await findUserSafely(customerId);
           if (user) {
             const days = (ord?.plan === 'yearly') ? 365 : 30;
             const premiumUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);

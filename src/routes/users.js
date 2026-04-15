@@ -4,6 +4,7 @@ import { env } from '../config/env.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { users, persistUserToDb } from '../lib/userStore.js';
 import User from '../models/User.js';
+import { findUserSafely } from '../utils/userLookup.js';
 import Room from '../models/Room.js';
 import DMRoom from '../models/DMRoom.js';
 import { containsProfanity } from '../middleware/profanityFilter.js';
@@ -792,7 +793,7 @@ router.get('/:id', asyncHandler(async (req, res) => {
     let doc = null;
 
     if (!doc && looksLikeObjectId(idToResolve)) {
-      doc = await User.findById(idToResolve).lean().exec().catch(() => null);
+      doc = await findUserSafely(idToResolve);
     }
     if (!doc) {
       doc = await User.findOne({ guestId: idToResolve }).lean().exec().catch(() => null);

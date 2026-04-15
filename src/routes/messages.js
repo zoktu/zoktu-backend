@@ -10,6 +10,7 @@ import {
   updateRoomDocByIdWithCache as updateRoomDocById
 } from '../lib/roomCache.js';
 import User from '../models/User.js';
+import { findUserSafely } from '../utils/userLookup.js';
 import Notification from '../models/Notification.js';
 import { sendWebPushNotifications } from '../lib/webPush.js';
 import requireVerifiedForHighRisk from '../middleware/riskGuard.js';
@@ -1624,7 +1625,7 @@ router.post('/rooms/:roomId/messages', requireVerifiedForHighRisk, asyncHandler(
       }
       // check user's linked guestId
       try {
-        const u = senderId ? await User.findById(senderId).lean().catch(() => null) : null;
+        const u = senderId ? await findUserSafely(senderId) : null;
         if (u && u.guestId && Array.isArray(roomDoc.bannedUsers) && roomDoc.bannedUsers.includes(u.guestId)) {
           return res.status(403).json({ message: 'You are banned from this room' });
         }

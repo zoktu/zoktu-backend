@@ -585,7 +585,11 @@ router.post('/signup', asyncHandler(async (req, res) => {
   // persist to DB and in-memory
   try {
     user.lastIp = getRequestIp(req);
-    await persistUserToDb(user);
+    const saved = await persistUserToDb(user);
+    if (saved && saved._id) {
+      user.id = String(saved._id);
+      user._id = saved._id;
+    }
   } catch (e) {
     // non-fatal: continue using in-memory copy
   }

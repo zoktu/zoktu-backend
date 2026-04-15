@@ -28,6 +28,7 @@ import {
 import { encryptMessageContent, decryptMessageContent } from './lib/messageCrypto.js';
 import { startUserCleanupJob } from './lib/userCleanup.js';
 import { sendSystemMessage } from './lib/systemMessages.js';
+import { findUserSafely } from './utils/userLookup.js';
 
 
 const app = express();
@@ -618,7 +619,7 @@ io.on('connection', (socket) => {
 
     try {
       // Security: Only verified users can initiate calls
-      const caller = await User.findById(effectiveUserId).select('emailVerified userType').lean().catch(() => null);
+      const caller = await findUserSafely(effectiveUserId, 'emailVerified userType');
       const isVerified = caller?.emailVerified || caller?.userType === 'premium';
       
       if (!isVerified) {
