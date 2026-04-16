@@ -278,7 +278,7 @@ const scheduleRandomQueueTimeout = (socket, timeoutMs = 25000) => {
       try {
         socket.emit('random:timeout');
       } catch (e) {
-        // ignore
+        
       }
     }
     randomQueueTimeouts.delete(sid);
