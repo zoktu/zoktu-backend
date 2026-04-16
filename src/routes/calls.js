@@ -99,4 +99,40 @@ router.post('/token', asyncHandler(async (req, res) => {
   res.json({ token, channelName, appId: env.agoraAppId, uid, expireTime: privilegeExpireTime });
 }));
 
+// End Room Voice Chat for everyone (Admin/Owner only)
+router.post('/room/end-all', asyncHandler(async (req, res) => {
+  const { roomId } = req.body;
+  const userId = req.user.id;
+
+  if (!roomId) {
+    return res.status(400).json({ error: 'Missing roomId' });
+  }
+
+  const room = await Room.findById(roomId).select('owner admins isVoiceActive').lean();
+  if (!room) {
+    return res.status(404).json({ error: 'Room not found' });
+  }
+
+  const isAdmin = room.owner === userId || (Array.isArray(room.admins) && room.admins.includes(userId));
+  if (!isAdmin) {
+    return res.status(403).json({ error: 'Only room admins and owners can end voice chat for everyone' });
+  }
+
+  // Update room status
+  await Room.findByIdAndUpdate(roomId, { isVoiceActive: false });
+
+  // Broadcast to all participants via socket.io
+  const io = req.app.get('io');
+  if (io) {
+    // Notify all participants to stop their tracks
+    io.to(roomId).emit('room:voice:ended', { roomId, by: userId });
+    // Update the joining UI for everyone
+    io.to(roomId).emit('room:voice:status', { roomId, isActive: false });
+    
+    sendSystemMessage(io, roomId, 'Voice chat ended by an admin');
+  }
+
+  res.json({ success: true, message: 'Voice chat ended for everyone' });
+}));
+
 export default router;

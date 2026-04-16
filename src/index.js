@@ -17,6 +17,8 @@ import Room from './models/Room.js';
 import DMRoom from './models/DMRoom.js';
 import { checkGlobalBan } from './middleware/globalBanMiddleware.js';
 import GlobalBan from './models/GlobalBan.js';
+import CallLog from './models/CallLog.js';
+import Notification from './models/Notification.js';
 import { containsBlockedExternalLink } from './middleware/profanityFilter.js';
 import { upsertUserInMemory, updateUserPresenceInMemory } from './lib/userStore.js';
 import { createSocketIoRedisAdapter } from './lib/redis.js';
@@ -619,7 +621,7 @@ io.on('connection', (socket) => {
 
     try {
       // Security: Only verified users can initiate calls
-      const caller = await findUserSafely(effectiveUserId, 'emailVerified userType');
+      const caller = await findUserSafely(effectiveUserId, 'emailVerified userType name');
       const isVerified = caller?.emailVerified || caller?.userType === 'premium';
       
       if (!isVerified) {
@@ -627,15 +629,33 @@ io.on('connection', (socket) => {
         return;
       }
 
+      // Create initial call log (status defaults to 'missed' until accepted)
+      await CallLog.create({
+        callId: data.callId,
+        callerId: effectiveUserId,
+        receiverId: data.partnerId,
+        roomId: data.roomId,
+        type: data.callType || 'voice',
+        status: 'missed'
+      });
+
       io.to(`user:${data.partnerId}`).emit('call:invite', data);
     } catch (e) {
       console.warn('[Socket] Call invite failed:', e?.message || e);
     }
   });
-  socket.on('call:accepted', (data) => {
+  socket.on('call:accepted', async (data) => {
     if (!data?.partnerId) return;
     io.to(`user:${data.partnerId}`).emit('call:accepted', data);
     
+    // Update call log to ongoing
+    try {
+      await CallLog.findOneAndUpdate(
+        { callId: data.callId },
+        { status: 'ongoing', startTime: new Date() }
+      );
+    } catch (e) {}
+
     // Send system message to the DM room
     if (data.roomId) {
       const callType = data.type === 'video' ? 'Video' : 'Voice';
@@ -643,21 +663,94 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('call:rejected', (data) => {
+  socket.on('call:rejected', async (data) => {
     if (!data?.partnerId) return;
     io.to(`user:${data.partnerId}`).emit('call:rejected', data);
+
+    try {
+      await CallLog.findOneAndUpdate(
+        { callId: data.callId },
+        { status: 'rejected', endTime: new Date() }
+      );
+
+      // Missed call notification
+      if (data.roomId) {
+        const callerName = data.callerName || 'User';
+        const callType = data.type || 'voice';
+        sendSystemMessage(io, data.roomId, `Missed ${callType} call from ${callerName}`);
+        
+        // Persist Global Notification
+        try {
+          const log = await CallLog.findOne({ callId: data.callId });
+          if (log && log.receiverId) {
+            await Notification.create({
+              userId: log.receiverId,
+              actorId: log.callerId,
+              roomId: data.roomId,
+              type: 'system',
+              title: `Missed ${callType} call`,
+              message: `You missed a ${callType} call from ${callerName}.`
+            });
+            io.to(`user:${log.receiverId}`).emit('zoktu:notification:received');
+          }
+        } catch (ne) {}
+      }
+    } catch (e) {}
   });
   socket.on('call:busy', (data) => {
     if (!data?.callerId) return;
     io.to(`user:${data.callerId}`).emit('call:busy', data);
   });
-  socket.on('call:ended', (data) => {
+  socket.on('call:ended', async (data) => {
     if (!data?.partnerId) return;
     io.to(`user:${data.partnerId}`).emit('call:ended', data);
 
-    // Send system message to the DM room
-    if (data.roomId) {
-      sendSystemMessage(io, data.roomId, 'Call ended');
+    try {
+      const log = await CallLog.findOne({ callId: data.callId });
+      if (log) {
+        if (log.status === 'ongoing') {
+          const endTime = new Date();
+          const duration = Math.floor((endTime.getTime() - new Date(log.startTime).getTime()) / 1000);
+          log.status = 'completed';
+          log.endTime = endTime;
+          log.duration = duration;
+          await log.save();
+          
+          if (data.roomId) {
+            sendSystemMessage(io, data.roomId, `Call ended • ${Math.floor(duration / 60)}m ${duration % 60}s`);
+          }
+        } else if (log.status === 'missed') {
+          // Caller ended before pick up -> missed call for receiver
+          log.status = 'missed';
+          log.endTime = new Date();
+          await log.save();
+
+          if (data.roomId) {
+            const callerName = data.callerName || 'User';
+            const callType = data.type || 'voice';
+            sendSystemMessage(io, data.roomId, `Missed ${callType} call from ${callerName}`);
+
+            // Persist Global Notification
+            try {
+              if (log.receiverId) {
+                await Notification.create({
+                  userId: log.receiverId,
+                  actorId: log.callerId,
+                  roomId: data.roomId,
+                  type: 'system',
+                  title: `Missed ${callType} call`,
+                  message: `You missed a ${callType} call from ${callerName}.`
+                });
+                io.to(`user:${log.receiverId}`).emit('zoktu:notification:received');
+              }
+            } catch (ne) {}
+          }
+        }
+      } else if (data.roomId) {
+        sendSystemMessage(io, data.roomId, 'Call ended');
+      }
+    } catch (e) {
+      if (data.roomId) sendSystemMessage(io, data.roomId, 'Call ended');
     }
   });
 
