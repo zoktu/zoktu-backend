@@ -45,10 +45,7 @@ router.post('/create-order', requireAuth, async (req, res) => {
     if (!profile) return res.status(400).json({ message: 'Invalid user' });
     if (!profile.emailVerified) return res.status(403).json({ message: 'Only email-verified users can purchase Premium' });
 
-    const resolvedPhone = profile.phone || profile.phoneNumber || req.body?.customer_phone || '';
-    if (!resolvedPhone) {
-      return res.status(400).json({ message: 'Phone number required. Please add your phone to your profile before purchasing.' });
-    }
+    const resolvedPhone = profile.phone || profile.phoneNumber || req.body?.customer_phone || '9999999999';
 
     const customer_details = {
       customer_id: customerId || `guest_${Date.now()}`,
