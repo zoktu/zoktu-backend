@@ -471,7 +471,7 @@ router.post('/signup', asyncHandler(async (req, res) => {
 
   // Block profane/explicit display names
   try {
-    if (containsProfanity(displayName || '', { lenient: true })) {
+    if (containsProfanity(displayName || '')) {
       return res.status(400).json({ message: 'Display name contains disallowed content' });
     }
   } catch (e) {
@@ -771,7 +771,7 @@ router.post('/guest', asyncHandler(async (req, res) => {
 
   // Block profane/explicit usernames
   try {
-    if (containsProfanity(username, { lenient: true })) {
+    if (containsProfanity(username)) {
       return res.status(400).json({ message: 'Username contains disallowed content' });
     }
   } catch (e) {
@@ -941,7 +941,7 @@ router.get('/check-username', (req, res) => {
 
   // Block profane/explicit usernames from availability checks
   try {
-    if (containsProfanity(username, { lenient: true })) {
+    if (containsProfanity(username)) {
       return res.status(400).json({ message: 'Username contains disallowed content', available: false });
     }
   } catch (e) {

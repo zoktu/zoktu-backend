@@ -5,7 +5,7 @@ const DEFAULT_PROFANITY = [
   // English / common (romanized)
   'nude','nudity','nudes','porn','pornography','xxx','adult','sex','sexual','sexuality',
   'fuck','fucked','fucking','fucker','fucks','cock','dick','pussy','boobs','tits','breasts','nipples', 'horny','sexting','lesbian','gay',
-  'anal','oral','blowjob','handjob','masturbate','masturbation','cum','semen','orgasm','chut','chutiya','chuti','chudai','chod','choda','gand','gaand','lund','lunda','land','lond','lundoo','bhenchod','madarchod','madar','maderchod','bhosdike','bhosadi','bhosdika','randi','randa','chodna','mutth','mutthi','mutth'
+  'anal','oral','blowjob','handjob','masturbate','masturbation','cum','semen','orgasm','chut','chutiya','chuti','chudai','chod','choda','gand','gaand','lund','lunda','land','lond','lundoo','bhenchod','madarchod','madar','maderchod','bhosdike','bhosadi','bhosdika','randi','randa','chodna','mutth','mutthi','kamine','kameena','harami','saala','sala','mader','bhen','behen','lodu','lauuda','bitch','bastard','slut','whore','retard','fag','faggot','nigger','nigga','cunt','motherfucker','ass','asshole'
 ];
 
 // Precompute normalized bad words for faster checks
