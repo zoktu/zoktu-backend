@@ -556,7 +556,7 @@ router.get('/', asyncHandler(async (req, res) => {
     const pipeline = [
       { $match: match },
       { $addFields: { memberCount: { $size: { $ifNull: ["$members", []] } } } },
-      { $sort: { memberCount: -1, updatedAt: -1 } }
+      { $sort: { sortOrder: -1, memberCount: -1, updatedAt: -1 } }
     ];
     const [roomDocs, dmRoomDocs] = await Promise.all([
       Room.aggregate(pipeline).allowDiskUse(true).exec(),
@@ -1795,7 +1795,7 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   const updates = req.body || {};
 
   // Only allow certain fields to be updated
-  const allowed = ['name', 'description', 'category', 'settings', 'admins', 'members', 'isActive'];
+  const allowed = ['name', 'description', 'category', 'settings', 'admins', 'members', 'isActive', 'sortOrder'];
   const setObj = {};
   for (const k of Object.keys(updates)) {
     if (allowed.includes(k)) setObj[k] = updates[k];

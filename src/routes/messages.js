@@ -1419,6 +1419,41 @@ router.post('/rooms/:roomId/messages/clear-for-me', asyncHandler(async (req, res
   res.json({ message: 'cleared', roomId });
 }));
 
+// Clear all messages in a room (admin/owner only)
+router.post('/rooms/:roomId/messages/clear-all', asyncHandler(async (req, res) => {
+  const roomId = req.params.roomId;
+  const auth = await getAuthIdentity(req);
+  if (!auth?.primary) return res.status(401).json({ message: 'Unauthorized' });
+
+  const roomDoc = await getRoomDocById(roomId);
+  if (!roomDoc) return res.status(404).json({ message: 'Room not found' });
+
+  const requesterIds = (auth.ids || []).map(String);
+  const ownerId = roomDoc.owner || roomDoc.createdBy;
+  const admins = Array.isArray(roomDoc.admins) ? roomDoc.admins.map(String) : [];
+
+  const isOwner = ownerId && requesterIds.includes(String(ownerId));
+  const isAdmin = admins.some(adminId => requesterIds.includes(String(adminId)));
+
+  if (!isOwner && !isAdmin) {
+    return res.status(403).json({ message: 'Only owner or admins can clear messages' });
+  }
+
+  const Model = getModelForRoom(roomDoc);
+  await Model.deleteMany({ roomId }).exec();
+
+  if (messages.has(roomId)) {
+    messages.delete(roomId);
+  }
+
+  const io = req.app.get('io');
+  if (io) {
+    io.to(roomId).emit('room:messages-cleared', { roomId, clearedBy: auth.primary });
+  }
+
+  res.json({ message: 'All messages cleared', roomId });
+}));
+
 // DM receipts: receiver marks messages as delivered/read.
 router.post('/rooms/:roomId/messages/mark-delivered', asyncHandler(async (req, res) => {
   const roomId = req.params.roomId;

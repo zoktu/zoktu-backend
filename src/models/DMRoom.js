@@ -19,6 +19,7 @@ const DMRoomSchema = new mongoose.Schema({
   category: String,
   hiddenFor: [String],
   isActive: { type: Boolean, default: true },
+  sortOrder: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });

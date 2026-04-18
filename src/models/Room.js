@@ -20,6 +20,7 @@ const RoomSchema = new mongoose.Schema({
   hiddenFor: [String],
   isActive: { type: Boolean, default: true },
   isVoiceActive: { type: Boolean, default: false },
+  sortOrder: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
